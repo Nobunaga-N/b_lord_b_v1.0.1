@@ -10,6 +10,7 @@ from typing import List
 import click
 from loguru import logger
 from utils.emulator_discovery import EmulatorDiscovery
+from utils.smart_ldconsole import SmartLDConsole
 
 
 class Orchestrator:
@@ -21,6 +22,16 @@ class Orchestrator:
 
         # Настройка логирования
         self._setup_logging()
+
+        # Загружаем конфигурацию эмуляторов для получения пути к ldconsole
+        self.discovery.load_config()
+
+        # Инициализируем SmartLDConsole с найденным путем
+        ldconsole_path = None
+        if self.discovery.ldconsole_path:
+            ldconsole_path = self.discovery.ldconsole_path
+
+        self.ldconsole = SmartLDConsole(ldconsole_path)  # <-- ДОБАВЛЕНА ЭТА СТРОКА
 
         logger.info("Инициализирован Orchestrator")
 

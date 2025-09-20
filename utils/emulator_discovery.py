@@ -81,12 +81,16 @@ class EmulatorDiscovery:
             Path("C:/LDPlayer4.0/ldconsole.exe"),
             Path("D:/LDPlayer/LDPlayer4.0/ldconsole.exe"),
             Path("D:/LDPlayer4.0/ldconsole.exe"),
+            Path("E:/LDPlayer/LDPlayer4.0/ldconsole.exe"),
+            Path("E:/LDPlayer4.0/ldconsole.exe"),
 
             # LDPlayer 9
             Path("C:/LDPlayer/LDPlayer9/ldconsole.exe"),
             Path("C:/LDPlayer9/ldconsole.exe"),
             Path("D:/LDPlayer/LDPlayer9/ldconsole.exe"),
             Path("D:/LDPlayer9/ldconsole.exe"),
+            Path("E:/LDPlayer/LDPlayer9/ldconsole.exe"),  # Добавлен путь для диска E
+            Path("E:/LDPlayer9/ldconsole.exe"),
 
             # Из переменной PATH
             Path("ldconsole.exe"),

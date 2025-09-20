@@ -39,8 +39,8 @@ class SmartLDConsole:
             Path("C:/LDPlayer9/ldconsole.exe"),
             Path("D:/LDPlayer/LDPlayer9/ldconsole.exe"),
             Path("D:/LDPlayer9/ldconsole.exe"),
-            Path("E:/LDPlayer/LDPlayer4.0/ldconsole.exe"),
-            Path("E:/LDPlayer4.0/ldconsole.exe"),
+            Path("E:/LDPlayer/LDPlayer9/ldconsole.exe"),
+            Path("E:/LDPlayer9/ldconsole.exe"),
             Path("C:/LDPlayer/LDPlayer4.0/ldconsole.exe"),
             Path("C:/LDPlayer4.0/ldconsole.exe"),
             Path("D:/LDPlayer/LDPlayer4.0/ldconsole.exe"),
@@ -243,7 +243,8 @@ class SmartLDConsole:
                     if len(parts) >= 5:
                         try:
                             emu_index = int(parts[0])
-                            is_running = parts[4].lower() == 'true'
+                            is_running_str = parts[4].strip().lower()
+                            is_running = is_running_str in ['true', '1', 'yes']
                             if emu_index == index and is_running:
                                 return True
                         except (ValueError, IndexError):
@@ -320,22 +321,43 @@ class SmartLDConsole:
             True если подключение доступно, False иначе
         """
         try:
-            # Быстрая проверка через adb connect
+            # Метод 1: Проверяем через adb devices
             result = subprocess.run(
-                ["adb", "connect", f"127.0.0.1:{port}"],
+                ["adb", "devices"],
                 capture_output=True,
                 text=True,
                 timeout=5.0
             )
 
-            # Проверяем успешность подключения
-            output = result.stdout.lower()
-            if "connected" in output or "already connected" in output:
-                logger.debug(f"ADB порт {port} доступен")
-                return True
-            else:
-                logger.debug(f"ADB порт {port} недоступен: {result.stdout}")
-                return False
+            if result.returncode == 0:
+                # Ищем устройство в формате emulator-XXXX
+                emulator_name = f"emulator-{port}"
+                for line in result.stdout.split('\n'):
+                    if emulator_name in line and "device" in line:
+                        logger.debug(f"Устройство {emulator_name} найдено в adb devices")
+
+                        # Метод 2: Тестируем shell команду
+                        try:
+                            shell_result = subprocess.run(
+                                ["adb", "-s", emulator_name, "shell", "echo", "test"],
+                                capture_output=True,
+                                text=True,
+                                timeout=3.0
+                            )
+
+                            if shell_result.returncode == 0 and "test" in shell_result.stdout:
+                                logger.debug(f"ADB порт {port} ({emulator_name}) работает корректно")
+                                return True
+                            else:
+                                logger.debug(f"ADB {emulator_name} не отвечает на shell команды")
+                                return False
+
+                        except subprocess.TimeoutExpired:
+                            logger.debug(f"Таймаут shell команды для {emulator_name}")
+                            return False
+
+            logger.debug(f"ADB порт {port} недоступен")
+            return False
 
         except subprocess.TimeoutExpired:
             logger.debug(f"Таймаут при проверке ADB порта {port}")
@@ -391,7 +413,8 @@ class SmartLDConsole:
                     try:
                         index = int(parts[0])
                         name = parts[1]
-                        is_running = parts[4].lower() == 'true'
+                        is_running_str = parts[4].strip().lower()
+                        is_running = is_running_str in ['true', '1', 'yes']
 
                         emulator_info = {
                             "index": index,
