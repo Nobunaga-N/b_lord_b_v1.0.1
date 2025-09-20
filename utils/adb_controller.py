@@ -36,7 +36,7 @@ class ADBController:
         Подключение к устройству по указанному порту
 
         Args:
-            device_port: Порт устройства (например, 5555 для первого LDPlayer)
+            device_port: Порт устройства (например, 5554 для первого LDPlayer)
 
         Returns:
             True если подключение успешно, False иначе

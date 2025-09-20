@@ -1,0 +1,28 @@
+emulators:
+- index: 0
+  name: 0) astralshop@gmail
+  adb_port: 5554
+  enabled: true
+  notes: Требует настройки
+- index: 1
+  name: 1) himera.like.a.knigh
+  adb_port: 5556
+  enabled: true
+  notes: Требует настройки
+- index: 2
+  name: '2) eavercesm@gmail.com '
+  adb_port: 5558
+  enabled: false
+  notes: Требует настройки
+- index: 3
+  name: 3) enemcov210@gmail.com
+  adb_port: 5560
+  enabled: false
+  notes: Требует настройки
+- index: 4
+  name: LDPlayer-4
+  adb_port: 5562
+  enabled: false
+  notes: Требует настройки
+ldconsole_path: E:\LDPlayer\LDPlayer9\ldconsole.exe
+last_scan: null

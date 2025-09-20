@@ -7,6 +7,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from loguru import logger
 from utils.adb_controller import ADBController
@@ -27,7 +28,7 @@ class BotWorker:
 
         # Рассчитываем порт ADB по стандартной формуле LDPlayer
         if adb_port is None:
-            self.adb_port = 5555 + emulator_index * 2
+            self.adb_port = 5554 + emulator_index * 2  # Исправлена формула
         else:
             self.adb_port = adb_port
 
