@@ -260,6 +260,7 @@ def test_resource_validation():
 
     try:
         from utils.building_manager import BuildingManager, PlanedAction, ActionType
+        from utils.database import Database  # Добавляем недостающий импорт
 
         building_manager = BuildingManager(Database("data/test_parallel.db"))
 
@@ -300,6 +301,7 @@ def test_lord_optimization():
 
     try:
         from utils.building_manager import BuildingManager
+        from utils.database import Database  # Добавляем недостающий импорт
 
         building_manager = BuildingManager(Database("data/test_parallel.db"))
         emulator_id = 1
