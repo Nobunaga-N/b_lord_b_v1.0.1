@@ -545,6 +545,45 @@ class Database:
             logger.error(f"Ошибка обновления целей исследований: {e}")
             return False
 
+    def get_available_research_for_upgrade(self, emulator_id: int) -> List[Dict[str, Any]]:
+        """
+        Получение списка доступных исследований для апгрейда
+        (разблокированных по уровню лорда и не исследующихся сейчас)
+
+        Args:
+            emulator_id: ID эмулятора
+
+        Returns:
+            Список доступных исследований для апгрейда
+        """
+        # Получаем текущий уровень лорда эмулятора
+        emulator = self.get_emulator_by_id(emulator_id)
+        if not emulator:
+            return []
+
+        lord_level = emulator['lord_level']
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM research_progress 
+                WHERE emulator_id = ? 
+                  AND is_researching = FALSE 
+                  AND current_level < target_level
+                ORDER BY research_name
+            ''', (emulator_id,))
+
+            all_research = [dict(row) for row in cursor.fetchall()]
+
+        # Фильтруем по разблокированным исследованиям
+        available = []
+        for research in all_research:
+            research_name = research['research_name']
+            if self.is_research_unlocked(research_name, lord_level):
+                available.append(research)
+
+        return available
+
     def get_building_progress_for_lord(self, emulator_id: int, target_lord_level: int) -> Dict[str, Any]:
         """
         Получение прогресса зданий для конкретного уровня лорда
@@ -846,7 +885,8 @@ class Database:
 
     def get_missing_requirements(self, emulator_id: int, target_lord_level: int) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Получение списка недостающих требований для повышения лорда
+        ИСПРАВЛЕННОЕ получение списка недостающих требований для повышения лорда
+        ТОЛЬКО здания являются блокирующими требованиями
 
         Args:
             emulator_id: ID эмулятора в БД
@@ -861,46 +901,44 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
+            # Проверяем ТОЛЬКО здания как блокирующие требования
             for category, buildings in requirements.items():
-                missing[category] = []
+                if category == 'buildings':  # ТОЛЬКО здания блокируют лорда
+                    missing[category] = []
 
-                for building_name, required_level in buildings.items():
-                    # Получаем текущий уровень
-                    if category == 'buildings':
+                    for building_name, required_level in buildings.items():
+                        # Получаем текущий уровень здания
                         cursor.execute('''
                             SELECT current_level FROM building_progress 
                             WHERE emulator_id = ? AND building_name = ?
                         ''', (emulator_id, building_name))
-                    else:  # research
-                        cursor.execute('''
-                            SELECT current_level FROM research_progress 
-                            WHERE emulator_id = ? AND research_name = ?
-                        ''', (emulator_id, building_name))
 
-                    result = cursor.fetchone()
-                    current_level = result['current_level'] if result else 0
+                        result = cursor.fetchone()
+                        current_level = result['current_level'] if result else 0
 
-                    if current_level < required_level:
-                        missing[category].append({
-                            'name': building_name,
-                            'current_level': current_level,
-                            'required_level': required_level,
-                            'levels_needed': required_level - current_level
-                        })
+                        if current_level < required_level:
+                            missing[category].append({
+                                'name': building_name,
+                                'current_level': current_level,
+                                'required_level': required_level,
+                                'levels_needed': required_level - current_level
+                            })
 
         return missing
 
     def check_lord_upgrade_readiness(self, emulator_id: int, target_lord_level: int) -> Tuple[
         bool, Dict[str, List[str]]]:
         """
-        Проверка готовности к повышению лорда
+        ИСПРАВЛЕННАЯ проверка готовности к повышению лорда
+        ТОЛЬКО ЗДАНИЯ блокируют повышение лорда!
+        Исследования показываются как информация, но НЕ блокируют
 
         Returns:
             Кортеж (готов, {категория: [список недостающих зданий/исследований]})
         """
         requirements = self.get_lord_requirements(target_lord_level)
         missing = {}
-        all_ready = True
+        lord_ready = True  # Готовность ТОЛЬКО по зданиям
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -909,79 +947,109 @@ class Database:
                 missing[category] = []
 
                 for building_name, required_level in buildings.items():
+                    # Проверяем только здания для блокировки лорда
                     if category == 'buildings':
                         cursor.execute('''
                             SELECT current_level FROM building_progress 
                             WHERE emulator_id = ? AND building_name = ?
                         ''', (emulator_id, building_name))
-                    else:  # research
-                        cursor.execute('''
-                            SELECT current_level FROM research_progress 
-                            WHERE emulator_id = ? AND research_name = ?
-                        ''', (emulator_id, building_name))
 
-                    result = cursor.fetchone()
-                    current_level = result['current_level'] if result else 0
+                        result = cursor.fetchone()
+                        current_level = result['current_level'] if result else 0
 
-                    if current_level < required_level:
-                        missing[category].append(f"{building_name} ({current_level}/{required_level})")
-                        all_ready = False
+                        if current_level < required_level:
+                            missing[category].append(f"{building_name} ({current_level}/{required_level})")
+                            lord_ready = False  # ТОЛЬКО здания блокируют лорда
 
-        return all_ready, missing
+            # Добавляем информацию об исследованиях (НЕ блокирующих)
+            available_research = self.get_available_research_for_upgrade(emulator_id)
+            if available_research:
+                missing['research_info'] = []
+                for research in available_research[:5]:  # Показываем первые 5
+                    research_name = research['research_name']
+                    current_level = research['current_level']
+                    target_level = research['target_level']
+                    missing['research_info'].append(f"{research_name} ({current_level}/{target_level})")
+
+        return lord_ready, missing
 
     def get_next_building_to_upgrade(self, emulator_id: int, current_lord_level: int) -> Optional[Dict[str, Any]]:
         """
-        Определение следующего здания для апгрейда на основе требований лорда
+        Определение следующего действия для выполнения (здание ИЛИ исследование)
+
+        ПРАВИЛЬНАЯ ЛОГИКА согласно txt файлам:
+        - Здания И исследования качаются ОДНОВРЕМЕННО по готовности!
+        - Если есть свободный слот строительства + недостающие здания → строить здание
+        - Если есть свободный слот исследований + доступные исследования → исследовать
+        - Приоритет отдается зданиям для лорда (они блокируют повышение)
 
         Args:
             emulator_id: ID эмулятора
             current_lord_level: Текущий уровень лорда
 
         Returns:
-            Информация о следующем здании для апгрейда или None
+            Информация о следующем действии (здание ИЛИ исследование) или None
         """
-        # Получаем требования для следующего уровня лорда
+
+        # ПРОВЕРЯЕМ ЗДАНИЯ ДЛЯ ЛОРДА (приоритет, т.к. блокируют повышение)
         target_level = current_lord_level + 1
-        missing = self.get_missing_requirements(emulator_id, target_level)
+        missing_buildings = self.get_missing_requirements(emulator_id, target_level)
 
-        # Приоритет: сначала здания, потом исследования
-        for category in ['buildings', 'research']:
-            if category in missing and missing[category]:
-                # Сортируем по количеству нужных уровней (меньше = приоритетнее)
-                sorted_missing = sorted(missing[category], key=lambda x: x['levels_needed'])
+        if 'buildings' in missing_buildings and missing_buildings['buildings']:
+            # Проверяем есть ли свободные слоты для строительства
+            active_buildings = self.get_active_buildings(emulator_id)
+            max_building_slots = 1  # Обычно 1 слот строительства (можно сделать настраиваемым)
 
-                next_item = sorted_missing[0]
+            if len(active_buildings) < max_building_slots:
+                # Есть свободный слот для строительства
+                sorted_missing = sorted(missing_buildings['buildings'], key=lambda x: x['levels_needed'])
 
-                # Проверяем не строится ли уже это здание/исследование
-                if category == 'buildings':
-                    table = 'building_progress'
-                    is_active_field = 'is_building'
-                    name_field = 'building_name'
-                else:
-                    table = 'research_progress'
-                    is_active_field = 'is_researching'
-                    name_field = 'research_name'
+                for building_item in sorted_missing:
+                    # Проверяем не строится ли уже это здание
+                    with self.get_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute('''
+                            SELECT is_building FROM building_progress
+                            WHERE emulator_id = ? AND building_name = ?
+                        ''', (emulator_id, building_item['name']))
 
-                with self.get_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(f'''
-                        SELECT {is_active_field} FROM {table}
-                        WHERE emulator_id = ? AND {name_field} = ?
-                    ''', (emulator_id, next_item['name']))
+                        result = cursor.fetchone()
+                        is_active = result['is_building'] if result else False
 
-                    result = cursor.fetchone()
-                    is_active = result[is_active_field] if result else False
+                    if not is_active:  # Если не строится
+                        return {
+                            'type': 'building',
+                            'name': building_item['name'],
+                            'current_level': building_item['current_level'],
+                            'target_level': building_item['current_level'] + 1,
+                            'final_target': building_item['required_level'],
+                            'lord_level': target_level,
+                            'priority': 'lord_building'  # Здания для лорда (приоритет)
+                        }
 
-                if not is_active:  # Если не строится/исследуется
-                    return {
-                        'type': category[:-1],  # 'building' или 'research'
-                        'name': next_item['name'],
-                        'current_level': next_item['current_level'],
-                        'target_level': next_item['current_level'] + 1,  # Следующий уровень
-                        'final_target': next_item['required_level'],
-                        'lord_level': target_level
-                    }
+        # ПРОВЕРЯЕМ ДОСТУПНЫЕ ИССЛЕДОВАНИЯ (параллельно с зданиями)
+        available_research = self.get_available_research_for_upgrade(emulator_id)
+        if available_research:
+            # Проверяем есть ли свободные слоты для исследований
+            active_research = self.get_active_research(emulator_id)
+            max_research_slots = 1  # Обычно 1 слот исследований (можно сделать настраиваемым)
 
+            if len(active_research) < max_research_slots:
+                # Есть свободный слот для исследований
+                # Берем первое доступное исследование (они отсортированы по порядку в ветках)
+                research_item = available_research[0]
+
+                return {
+                    'type': 'research',
+                    'name': research_item['research_name'],
+                    'current_level': research_item['current_level'],
+                    'target_level': research_item['current_level'] + 1,
+                    'final_target': research_item['target_level'],
+                    'lord_level': current_lord_level,
+                    'priority': 'research_parallel'  # Исследования параллельно
+                }
+
+        # Если все слоты заняты или нет доступных действий
         return None
 
     def load_speedup_settings_from_config(self, config_path: str = "configs/building_chains.yaml") -> bool:
