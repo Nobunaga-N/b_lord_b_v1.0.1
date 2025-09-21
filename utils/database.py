@@ -442,16 +442,33 @@ class Database:
             logger.error(f"Ошибка обновления прогресса здания: {e}")
             return False
 
-    def get_active_buildings(self, emulator_id: int) -> List[Dict[str, Any]]:
-        """Получение списка активно строящихся зданий"""
+    def get_active_buildings(self, emulator_id: int) -> List[Dict]:
+        """
+        Получение списка активных строительств для эмулятора
+
+        Args:
+            emulator_id: ID эмулятора
+
+        Returns:
+            Список активных строительств с деталями
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT * FROM building_progress 
+                SELECT 
+                    building_name,
+                    current_level,
+                    target_level,
+                    build_start_time,
+                    estimated_completion,
+                    use_speedups
+                FROM building_progress 
                 WHERE emulator_id = ? AND is_building = TRUE
-                ORDER BY estimated_completion
+                ORDER BY estimated_completion ASC
             ''', (emulator_id,))
-            return [dict(row) for row in cursor.fetchall()]
+
+            results = cursor.fetchall()
+            return [dict(row) for row in results]
 
     def update_building_targets_for_lord_level(self, emulator_id: int, target_lord_level: int) -> bool:
         """
@@ -669,7 +686,7 @@ class Database:
                 ORDER BY estimated_completion
             ''', (emulator_id, current_time))
             return [dict(row) for row in cursor.fetchall()]
-        """Получение списка завершенных строительств (готовых к апгрейду)"""
+        #Получение списка завершенных строительств (готовых к апгрейду)
         current_time = datetime.now().isoformat()
 
         with self.get_connection() as conn:
@@ -765,16 +782,33 @@ class Database:
             logger.error(f"Ошибка обновления прогресса исследования: {e}")
             return False
 
-    def get_active_research(self, emulator_id: int) -> List[Dict[str, Any]]:
-        """Получение списка активных исследований"""
+    def get_active_research(self, emulator_id: int) -> List[Dict]:
+        """
+        Получение списка активных исследований для эмулятора
+
+        Args:
+            emulator_id: ID эмулятора
+
+        Returns:
+            Список активных исследований с деталями
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT * FROM research_progress 
+                SELECT 
+                    research_name,
+                    current_level,
+                    target_level,
+                    research_start_time,
+                    estimated_completion,
+                    use_speedups
+                FROM research_progress 
                 WHERE emulator_id = ? AND is_researching = TRUE
-                ORDER BY estimated_completion
+                ORDER BY estimated_completion ASC
             ''', (emulator_id,))
-            return [dict(row) for row in cursor.fetchall()]
+
+            results = cursor.fetchall()
+            return [dict(row) for row in results]
 
     # === УПРАВЛЕНИЕ ТРЕБОВАНИЯМИ ЛОРДА ===
 
@@ -1051,6 +1085,356 @@ class Database:
 
         # Если все слоты заняты или нет доступных действий
         return None
+
+    def get_building_levels(self, emulator_id: int) -> Dict[str, int]:
+        """
+        Получение текущих уровней всех зданий для эмулятора
+
+        Args:
+            emulator_id: ID эмулятора
+
+        Returns:
+            Словарь {название_здания: текущий_уровень}
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT building_name, current_level 
+                FROM building_progress 
+                WHERE emulator_id = ?
+            ''', (emulator_id,))
+
+            results = cursor.fetchall()
+            return {row['building_name']: row['current_level'] for row in results}
+
+    def get_research_levels(self, emulator_id: int) -> Dict[str, int]:
+        """
+        Получение текущих уровней всех исследований для эмулятора
+
+        Args:
+            emulator_id: ID эмулятора
+
+        Returns:
+            Словарь {название_исследования: текущий_уровень}
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT research_name, current_level 
+                FROM research_progress 
+                WHERE emulator_id = ?
+            ''', (emulator_id,))
+
+            results = cursor.fetchall()
+            return {row['research_name']: row['current_level'] for row in results}
+
+    def get_speedup_setting(self, emulator_id: int, item_type: str, item_name: str,
+                            default_value: bool = False) -> bool:
+        """
+        Получение настройки ускорения для конкретного здания или исследования
+
+        Args:
+            emulator_id: ID эмулятора
+            item_type: Тип элемента ('buildings' или 'research')
+            item_name: Название здания или исследования
+            default_value: Значение по умолчанию
+
+        Returns:
+            True если включено ускорение, False если выключено
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            if item_type == 'buildings':
+                cursor.execute('''
+                    SELECT use_speedups 
+                    FROM building_progress 
+                    WHERE emulator_id = ? AND building_name = ?
+                ''', (emulator_id, item_name))
+            elif item_type == 'research':
+                cursor.execute('''
+                    SELECT use_speedups 
+                    FROM research_progress 
+                    WHERE emulator_id = ? AND research_name = ?
+                ''', (emulator_id, item_name))
+            else:
+                return default_value
+
+            result = cursor.fetchone()
+            return result['use_speedups'] if result else default_value
+
+    def start_building(self, emulator_id: int, building_name: str, completion_time: datetime) -> bool:
+        """
+        Начать строительство здания
+
+        Args:
+            emulator_id: ID эмулятора
+            building_name: Название здания
+            completion_time: Время завершения строительства
+
+        Returns:
+            True если успешно начато строительство
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Получаем текущий уровень здания
+                cursor.execute('''
+                    SELECT current_level 
+                    FROM building_progress 
+                    WHERE emulator_id = ? AND building_name = ?
+                ''', (emulator_id, building_name))
+
+                result = cursor.fetchone()
+                current_level = result['current_level'] if result else 0
+                target_level = current_level + 1
+
+                # Обновляем или создаем запись
+                cursor.execute('''
+                    INSERT OR REPLACE INTO building_progress (
+                        emulator_id, building_name, current_level, target_level,
+                        is_building, build_start_time, estimated_completion, updated_at
+                    ) VALUES (?, ?, ?, ?, TRUE, ?, ?, ?)
+                ''', (
+                    emulator_id, building_name, current_level, target_level,
+                    datetime.now(), completion_time, datetime.now()
+                ))
+
+                conn.commit()
+                logger.debug(
+                    f"Начато строительство {building_name} {current_level}->{target_level} для эмулятора {emulator_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Ошибка начала строительства {building_name}: {e}")
+            return False
+
+    def start_research(self, emulator_id: int, research_name: str, completion_time: datetime) -> bool:
+        """
+        Начать исследование
+
+        Args:
+            emulator_id: ID эмулятора
+            research_name: Название исследования
+            completion_time: Время завершения исследования
+
+        Returns:
+            True если успешно начато исследование
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Получаем текущий уровень исследования
+                cursor.execute('''
+                    SELECT current_level 
+                    FROM research_progress 
+                    WHERE emulator_id = ? AND research_name = ?
+                ''', (emulator_id, research_name))
+
+                result = cursor.fetchone()
+                current_level = result['current_level'] if result else 0
+                target_level = current_level + 1
+
+                # Обновляем или создаем запись
+                cursor.execute('''
+                    INSERT OR REPLACE INTO research_progress (
+                        emulator_id, research_name, current_level, target_level,
+                        is_researching, research_start_time, estimated_completion, updated_at
+                    ) VALUES (?, ?, ?, ?, TRUE, ?, ?, ?)
+                ''', (
+                    emulator_id, research_name, current_level, target_level,
+                    datetime.now(), completion_time, datetime.now()
+                ))
+
+                conn.commit()
+                logger.debug(f"Начато исследование {research_name} уровень {target_level} для эмулятора {emulator_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Ошибка начала исследования {research_name}: {e}")
+            return False
+
+    def complete_building(self, emulator_id: int, building_name: str) -> bool:
+        """
+        Завершить строительство здания
+
+        Args:
+            emulator_id: ID эмулятора
+            building_name: Название здания
+
+        Returns:
+            True если успешно завершено
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Получаем информацию о строительстве
+                cursor.execute('''
+                    SELECT target_level 
+                    FROM building_progress 
+                    WHERE emulator_id = ? AND building_name = ? AND is_building = TRUE
+                ''', (emulator_id, building_name))
+
+                result = cursor.fetchone()
+                if not result:
+                    logger.warning(f"Нет активного строительства {building_name} для эмулятора {emulator_id}")
+                    return False
+
+                target_level = result['target_level']
+
+                # Завершаем строительство
+                cursor.execute('''
+                    UPDATE building_progress 
+                    SET current_level = target_level,
+                        is_building = FALSE,
+                        build_start_time = NULL,
+                        estimated_completion = NULL,
+                        updated_at = ?
+                    WHERE emulator_id = ? AND building_name = ?
+                ''', (datetime.now(), emulator_id, building_name))
+
+                conn.commit()
+                logger.info(
+                    f"Завершено строительство {building_name} уровень {target_level} для эмулятора {emulator_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Ошибка завершения строительства {building_name}: {e}")
+            return False
+
+    def complete_research(self, emulator_id: int, research_name: str) -> bool:
+        """
+        Завершить исследование
+
+        Args:
+            emulator_id: ID эмулятора
+            research_name: Название исследования
+
+        Returns:
+            True если успешно завершено
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Получаем информацию об исследовании
+                cursor.execute('''
+                    SELECT target_level 
+                    FROM research_progress 
+                    WHERE emulator_id = ? AND research_name = ? AND is_researching = TRUE
+                ''', (emulator_id, research_name))
+
+                result = cursor.fetchone()
+                if not result:
+                    logger.warning(f"Нет активного исследования {research_name} для эмулятора {emulator_id}")
+                    return False
+
+                target_level = result['target_level']
+
+                # Завершаем исследование
+                cursor.execute('''
+                    UPDATE research_progress 
+                    SET current_level = target_level,
+                        is_researching = FALSE,
+                        research_start_time = NULL,
+                        estimated_completion = NULL,
+                        updated_at = ?
+                    WHERE emulator_id = ? AND research_name = ?
+                ''', (datetime.now(), emulator_id, research_name))
+
+                conn.commit()
+                logger.info(
+                    f"Завершено исследование {research_name} уровень {target_level} для эмулятора {emulator_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Ошибка завершения исследования {research_name}: {e}")
+            return False
+
+    def set_building_speedup(self, emulator_id: int, building_name: str, use_speedup: bool) -> bool:
+        """
+        Установить настройку ускорения для здания
+
+        Args:
+            emulator_id: ID эмулятора
+            building_name: Название здания
+            use_speedup: Включить/выключить ускорение
+
+        Returns:
+            True если успешно установлено
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Обновляем или создаем запись
+                cursor.execute('''
+                    INSERT OR REPLACE INTO building_progress (
+                        emulator_id, building_name, current_level, target_level,
+                        use_speedups, updated_at
+                    ) VALUES (?, ?, COALESCE((
+                        SELECT current_level FROM building_progress 
+                        WHERE emulator_id = ? AND building_name = ?
+                    ), 0), COALESCE((
+                        SELECT target_level FROM building_progress 
+                        WHERE emulator_id = ? AND building_name = ?
+                    ), 0), ?, ?)
+                ''', (
+                    emulator_id, building_name, emulator_id, building_name,
+                    emulator_id, building_name, use_speedup, datetime.now()
+                ))
+
+                conn.commit()
+                logger.debug(f"Установлено ускорение {building_name}: {use_speedup} для эмулятора {emulator_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Ошибка установки ускорения {building_name}: {e}")
+            return False
+
+    def set_research_speedup(self, emulator_id: int, research_name: str, use_speedup: bool) -> bool:
+        """
+        Установить настройку ускорения для исследования
+
+        Args:
+            emulator_id: ID эмулятора
+            research_name: Название исследования
+            use_speedup: Включить/выключить ускорение
+
+        Returns:
+            True если успешно установлено
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Обновляем или создаем запись
+                cursor.execute('''
+                    INSERT OR REPLACE INTO research_progress (
+                        emulator_id, research_name, current_level, target_level,
+                        use_speedups, updated_at
+                    ) VALUES (?, ?, COALESCE((
+                        SELECT current_level FROM research_progress 
+                        WHERE emulator_id = ? AND research_name = ?
+                    ), 0), COALESCE((
+                        SELECT target_level FROM research_progress 
+                        WHERE emulator_id = ? AND research_name = ?
+                    ), 0), ?, ?)
+                ''', (
+                    emulator_id, research_name, emulator_id, research_name,
+                    emulator_id, research_name, use_speedup, datetime.now()
+                ))
+
+                conn.commit()
+                logger.debug(f"Установлено ускорение {research_name}: {use_speedup} для эмулятора {emulator_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Ошибка установки ускорения {research_name}: {e}")
+            return False
 
     def load_speedup_settings_from_config(self, config_path: str = "configs/building_chains.yaml") -> bool:
         """
