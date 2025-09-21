@@ -311,20 +311,18 @@ class Database:
 
     def init_emulator_from_config(self, emulator_id: int, config_path: str = "configs/building_chains.yaml") -> bool:
         """
-        Полная инициализация прогресса эмулятора из конфига
-
-        Args:
-            emulator_id: ID эмулятора в БД
-            config_path: Путь к файлу конфигурации
-
-        Returns:
-            True если инициализация успешна, False иначе
+        Обновленная полная инициализация прогресса эмулятора из конфига
+        (ВКЛЮЧАЕТ загрузку веток исследований)
         """
         try:
             config_file = Path(config_path)
             if not config_file.exists():
                 logger.error(f"Файл конфигурации не найден: {config_path}")
                 return False
+
+            # Загружаем ветки исследований из конфига
+            if not self.load_research_branches_from_config(config_path):
+                logger.warning("Не удалось загрузить ветки исследований, продолжаем с базовыми настройками")
 
             with open(config_file, 'r', encoding='utf-8') as f:
                 config_data = yaml.safe_load(f)
@@ -339,17 +337,10 @@ class Database:
                     }
                 self.init_building_progress(emulator_id, buildings_config)
 
-            # Инициализируем прогресс исследований
-            if 'research_speedup_settings' in config_data:
-                research_config = {}
-                for research_name, use_speedup in config_data['research_speedup_settings'].items():
-                    research_config[research_name] = {
-                        'target_level': 1,  # Начальная цель
-                        'use_speedups': use_speedup
-                    }
-                self.init_research_progress(emulator_id, research_config)
+            # Инициализируем прогресс исследований ИЗ ВЕТОК
+            self.init_research_progress_from_branches(emulator_id)
 
-            logger.success(f"Инициализирован прогресс эмулятора {emulator_id} из конфига")
+            logger.success(f"Инициализирован прогресс эмулятора {emulator_id} из конфига с ветками исследований")
             return True
 
         except Exception as e:
@@ -1087,6 +1078,198 @@ class Database:
                 ORDER BY research_name
             ''', (emulator_id,))
             return [dict(row) for row in cursor.fetchall()]
+
+    def load_research_branches_from_config(self, config_path: str = "configs/building_chains.yaml") -> bool:
+        """
+        Загрузка веток исследований из конфига
+
+        Args:
+            config_path: Путь к файлу конфигурации
+
+        Returns:
+            True если загрузка успешна, False иначе
+        """
+        try:
+            config_file = Path(config_path)
+            if not config_file.exists():
+                logger.error(f"Файл конфигурации не найден: {config_path}")
+                return False
+
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config_data = yaml.safe_load(f)
+
+            if 'research_branches' not in config_data:
+                logger.warning("Секция 'research_branches' не найдена в конфиге, используем встроенные ограничения")
+                return True
+
+            # Сохраняем ветки исследований в атрибуте класса для быстрого доступа
+            self._research_branches = config_data['research_branches']
+
+            logger.success(f"Загружены ветки исследований: {list(self._research_branches.keys())}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Ошибка загрузки веток исследований: {e}")
+            return False
+
+    def get_research_branches_restrictions(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Получение ограничений веток исследований по уровню лорда
+        (из конфига или встроенных)
+
+        Returns:
+            Словарь {ветка: {min_lord_level: int, researches: dict}}
+        """
+        # Если загружены из конфига, используем их
+        if hasattr(self, '_research_branches') and self._research_branches:
+            return self._research_branches
+
+        # Иначе используем встроенные ограничения как fallback (по txt файлам)
+        logger.warning("Используем встроенные ограничения веток исследований")
+        return {
+            'territory_development': {
+                'min_lord_level': 10,
+                'researches': {
+                    'развитие_территории': 1, 'изобилие_света': 5, 'сапротрофное_удобрение': 5,
+                    'выхлый_грунт': 5, 'плодородная_почва': 5, 'журчащий_источник': 5,
+                    'массивный_песчаник': 5, 'гигантский_улей': 10, 'загруженный_сборщик': 5,
+                    'резвый_подъем': 10, 'мягкая_почва': 10, 'скоростная_перевозка': 10,
+                    'меткая_резка': 1, 'накопитель': 10
+                }
+            },
+            'basic_combat': {
+                'min_lord_level': 13,
+                'researches': {
+                    'похвала_за_смелость': 1, 'мутация_травоядных_1': 1, 'мутация_плотоядных_1': 1,
+                    'мутация_всеядных_1': 1, 'сверх_грабеж': 5, 'начальная_атака': 3, 'начальная_защита': 3,
+                    'мутация_травоядных_2': 1, 'мутация_плотоядных_2': 1, 'мутация_всеядных_2': 1,
+                    'увеличение_опыта': 3, 'средняя_атака': 2, 'средняя_защита': 2, 'навык_уклонения': 5,
+                    'продвинутая_атака': 5, 'продвинутая_защита': 3
+                }
+            },
+            'medium_combat': {
+                'min_lord_level': 14,
+                'researches': {
+                    'преимущество_скорости': 5, 'особый_отряд': 1, 'эффективный_сбор': 5,
+                    'увеличение_грузоподъемности': 5
+                }
+            },
+            'march_squads': {
+                'min_lord_level': 17,
+                'researches': {
+                    'походный_отряд_1': 1, 'походный_отряд_2': 1, 'походный_отряд_3': 1,
+                    'развитие_района': 1, 'доп_награды': 10, 'средние_награды': 1,
+                    'эволюция_плотоядных': 1, 'клыки_и_когти_1': 5
+                }
+            }
+        }
+
+    def is_research_unlocked(self, research_name: str, lord_level: int) -> bool:
+        """
+        Проверка разблокировано ли исследование для текущего уровня лорда
+
+        Args:
+            research_name: Название исследования
+            lord_level: Текущий уровень лорда
+
+        Returns:
+            True если исследование разблокировано, False иначе
+        """
+        branches = self.get_research_branches_restrictions()
+
+        for branch_name, branch_data in branches.items():
+            researches = branch_data.get('researches', {})
+            if research_name in researches:
+                min_level = branch_data.get('min_lord_level', 10)
+                is_unlocked = lord_level >= min_level
+
+                if not is_unlocked:
+                    logger.debug(f"Исследование '{research_name}' заблокировано для лорда {lord_level} "
+                                 f"(требуется минимум {min_level}, ветка: {branch_name})")
+
+                return is_unlocked
+
+        # Если исследование не найдено в ветках, считаем его разблокированным
+        logger.warning(f"Исследование '{research_name}' не найдено в ветках ограничений")
+        return True
+
+    def get_research_max_level(self, research_name: str) -> int:
+        """
+        Получение максимального уровня исследования из конфига
+
+        Args:
+            research_name: Название исследования
+
+        Returns:
+            Максимальный уровень исследования
+        """
+        branches = self.get_research_branches_restrictions()
+
+        for branch_name, branch_data in branches.items():
+            researches = branch_data.get('researches', {})
+            if research_name in researches:
+                return researches[research_name]
+
+        # Если не найдено, возвращаем 1 как базовый уровень
+        logger.warning(f"Максимальный уровень для исследования '{research_name}' не найден, используем 1")
+        return 1
+
+    def init_research_progress_from_branches(self, emulator_id: int) -> bool:
+        """
+        Инициализация прогресса исследований на основе веток из конфига
+
+        Args:
+            emulator_id: ID эмулятора
+
+        Returns:
+            True если инициализация успешна, False иначе
+        """
+        try:
+            branches = self.get_research_branches_restrictions()
+
+            # Получаем настройки ускорений из конфига
+            config_file = Path("configs/building_chains.yaml")
+            research_speedups = {}
+
+            if config_file.exists():
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config_data = yaml.safe_load(f)
+                    research_speedups = config_data.get('research_speedup_settings', {})
+
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                total_researches = 0
+                for branch_name, branch_data in branches.items():
+                    researches = branch_data.get('researches', {})
+
+                    for research_name, max_level in researches.items():
+                        # Проверяем существует ли запись
+                        cursor.execute('''
+                            SELECT id FROM research_progress 
+                            WHERE emulator_id = ? AND research_name = ?
+                        ''', (emulator_id, research_name))
+
+                        if not cursor.fetchone():
+                            # Создаем новую запись
+                            use_speedup = research_speedups.get(research_name, False)
+
+                            cursor.execute('''
+                                INSERT INTO research_progress 
+                                (emulator_id, research_name, target_level, use_speedups)
+                                VALUES (?, ?, ?, ?)
+                            ''', (emulator_id, research_name, max_level, use_speedup))
+
+                            total_researches += 1
+
+                conn.commit()
+
+            logger.success(f"Инициализировано {total_researches} исследований из веток для эмулятора {emulator_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Ошибка инициализации исследований из веток: {e}")
+            return False
 
     def update_emulator_lord_upgrade_status(self, emulator_id: int) -> bool:
         """
