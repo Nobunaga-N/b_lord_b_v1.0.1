@@ -1,6 +1,7 @@
 """
 Система управления прайм-таймами для Beast Lord The New Land.
 Определяет оптимальные времена для различных игровых действий.
+ИСПРАВЛЕНО: Учитывает периоды обновления заданий (X:00-X:05) когда прайм-тайм НЕ работает.
 """
 
 import yaml
@@ -50,10 +51,47 @@ class PrimeTimeManager:
         self.config_path = Path(config_path)
         self.prime_times: Dict[str, List[PrimeTimeAction]] = {}
 
+        # Настройки из конфига
+        self.settings = {
+            'max_wait_hours': 2.0,
+            'tolerance_minutes': 3,  # Уменьшено до 3 минут
+            'maintenance_periods': {
+                'duration_minutes': 5,  # X:00-X:05 - обновление заданий
+                'starts_at_minute': 0
+            }
+        }
+
         # Загружаем прайм-таймы
         self.load_prime_times_from_config()
 
         logger.info(f"Инициализирован PrimeTimeManager, загружено {self._count_total_actions()} прайм-таймов")
+
+    def is_maintenance_period(self, target_time: Optional[datetime] = None) -> bool:
+        """
+        Проверка является ли указанное время периодом обновления (X:00-X:05)
+
+        Args:
+            target_time: Время для проверки (по умолчанию - текущее)
+
+        Returns:
+            True если это период обновления, False иначе
+        """
+        if target_time is None:
+            target_time = datetime.now()
+
+        # Прайм-тайм НЕ работает в периоды X:00-X:05 каждый час
+        maintenance_duration = self.settings['maintenance_periods']['duration_minutes']
+        maintenance_start = self.settings['maintenance_periods']['starts_at_minute']
+
+        current_minute = target_time.minute
+
+        # Проверяем находимся ли в периоде обновления
+        is_maintenance = maintenance_start <= current_minute < (maintenance_start + maintenance_duration)
+
+        if is_maintenance:
+            logger.debug(f"Период обновления заданий: {target_time.strftime('%H:%M')} - прайм-тайм не работает")
+
+        return is_maintenance
 
     def load_prime_times_from_config(self) -> bool:
         """
@@ -71,7 +109,17 @@ class PrimeTimeManager:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 config_data = yaml.safe_load(f)
 
-            if not config_data or 'prime_times' not in config_data:
+            if not config_data:
+                logger.warning("Конфиг прайм-таймов пустой")
+                self._load_default_prime_times()
+                return False
+
+            # Загружаем настройки если есть
+            if 'settings' in config_data:
+                self.settings.update(config_data['settings'])
+                logger.debug(f"Загружены настройки: {self.settings}")
+
+            if 'prime_times' not in config_data:
                 logger.warning("Секция 'prime_times' не найдена в конфиге")
                 self._load_default_prime_times()
                 return False
@@ -119,39 +167,43 @@ class PrimeTimeManager:
         """Загрузка базовых прайм-таймов если конфиг недоступен"""
         logger.info("Загружаем базовые прайм-таймы...")
 
-        # Базовые прайм-таймы на основе Prime Time_fixed_v3.txt
+        # Базовые прайм-таймы на основе Prime Time_fixed_v4.txt (ПРАВИЛЬНЫЕ данные)
         default_actions = [
-            # Понедельник - развитие муравейника
+            # Понедельник - развитие муравейника (00:05-23:05)
+            (0, 0, 5, "wild_bonus", "сила эволюции, ускорение вылуп/улучш дикого 💖, корм, скорлупа"),
             (0, 9, 5, "building_power", "сила зданий, сила эволюции, вылуп солдат"),
             (0, 17, 5, "building_power", "сила зданий, сила эволюции, вылуп солдат"),
-            (0, 1, 5, "building_power", "сила зданий, сила эволюции, вылуп солдат"),
 
-            # Вторник - сбор ресурсов
-            (1, 6, 5, "resource_bonus", "сила зданий, вылупление солдат, клетки"),
-            (1, 14, 5, "resource_bonus", "сила зданий, вылупление солдат, клетки"),
-            (1, 22, 5, "resource_bonus", "сила зданий, вылупление солдат, клетки"),
+            # Вторник - сбор ресурсов (00:05-23:05)
+            (1, 1, 5, "building_power", "сила зданий, сила эволюции, вылуп солдат"),
+            (1, 6, 5, "resource_bonus", "сила зданий ⭐, вылупление солдат, клетки"),
+            (1, 14, 5, "resource_bonus", "сила зданий ⭐, вылупление солдат, клетки"),
+            (1, 22, 5, "resource_bonus", "сила зданий ⭐, вылупление солдат, клетки"),
 
-            # Среда - эволюция
-            (2, 12, 5, "evolution_bonus", "сила эволюции, ускор на эволюцию"),
-            (2, 20, 5, "evolution_bonus", "сила эволюции, ускор на эволюцию"),
+            # Среда - эволюция (00:05-23:05)
+            (2, 1, 5, "evolution_bonus", "сила эволюции, сила зданий ⭐, вылупление солдат"),
+            (2, 12, 5, "evolution_bonus", "сила эволюции 💖, ускор на эволюцию, останки животных"),
+            (2, 20, 5, "evolution_bonus", "сила эволюции 💖, ускор на эволюцию, останки животных"),
 
-            # Четверг - спецуслуги
-            (3, 4, 5, "special_services", "мут споры, яйца, опыт, навыки"),
-            (3, 12, 5, "special_services", "мут споры, яйца, опыт, навыки"),
-            (3, 20, 5, "special_services", "мут споры, яйца, опыт, навыки"),
+            # Четверг - спецуслуги (00:05-23:05)
+            (3, 4, 5, "special_services", "мут споры, яйца 💖, опыт, навыки"),
+            (3, 12, 5, "special_services", "мут споры, яйца 💖, опыт, навыки"),
+            (3, 20, 5, "special_services", "мут споры, яйца 💖, опыт, навыки"),
 
-            # Пятница - выпущенные солдат
-            (4, 17, 5, "training_bonus", "сила зданий, вылупление солдат"),
-            (4, 1, 5, "training_bonus", "сила зданий, вылупление солдат"),
+            # Пятница - выпущенные солдат (00:05-23:05)
+            (4, 0, 5, "special_services", "мут споры, яйца 💖, опыт, навыки"),
+            (4, 17, 5, "training_bonus", "сила зданий ⭐, вылупление солдат"),
+            (4, 1, 5, "evolution_bonus", "сила эволюции, сила зданий, ускор на вылупление"),
 
-            # Суббота - на выбор (лучше сбор)
-            (5, 9, 5, "building_power", "сила зданий, вылупление солдат"),
-            (5, 17, 5, "building_power", "сила зданий, вылупление солдат"),
+            # Суббота - на выбор (00:05-23:05)
+            (5, 1, 5, "training_bonus", "сила зданий ⭐, вылупление солдат"),
+            (5, 9, 5, "training_bonus", "сила зданий ⭐, вылупление солдат"),
+            (5, 17, 5, "training_bonus", "сила зданий ⭐, вылупление солдат"),
 
-            # Воскресенье - сумм/район/стоп
-            (6, 6, 5, "wild_bonus", "ускорение вылуп/улучш дикого, корм, скорлупа"),
-            (6, 14, 5, "wild_bonus", "ускорение вылуп/улучш дикого, корм, скорлупа"),
-            (6, 22, 5, "wild_bonus", "сила эволюции, вылупление солдат")
+            # Воскресенье - сумм/район/стоп (00:05-23:05)
+            (6, 1, 5, "training_bonus", "сила зданий ⭐, вылупление солдат"),
+            (6, 4, 5, "wild_bonus", "ускорение вылуп/улучш дикого 💖, корм, скорлупа"),
+            (6, 22, 5, "wild_bonus", "сила эволюции 💖, вылупление солдат, корм, скорлупа")
         ]
 
         self.prime_times = {}
@@ -226,6 +278,7 @@ class PrimeTimeManager:
     def get_current_prime_actions(self, target_time: Optional[datetime] = None) -> List[PrimeTimeAction]:
         """
         Получение текущих прайм-таймов для указанного времени
+        ИСПРАВЛЕНО: Учитывает периоды обновления заданий
 
         Args:
             target_time: Время для проверки (по умолчанию - текущее)
@@ -236,17 +289,23 @@ class PrimeTimeManager:
         if target_time is None:
             target_time = datetime.now()
 
+        # КРИТИЧНО: Проверяем период обновления заданий
+        if self.is_maintenance_period(target_time):
+            logger.debug(f"Период обновления {target_time.strftime('%H:%M')} - прайм-тайм не активен")
+            return []
+
         current_day = target_time.weekday()  # 0=ПН, 6=ВС
         current_hour = target_time.hour
         current_minute = target_time.minute
 
         active_actions = []
+        tolerance = self.settings['tolerance_minutes']
 
         for action_type, actions in self.prime_times.items():
             for action in actions:
                 if (action.day_of_week == current_day and
                         action.hour == current_hour and
-                        abs(action.minute - current_minute) <= 5):  # ±5 минут допуск
+                        abs(action.minute - current_minute) <= tolerance):
                     active_actions.append(action)
 
         return active_actions
@@ -255,6 +314,7 @@ class PrimeTimeManager:
                               from_time: Optional[datetime] = None) -> Optional[Tuple[datetime, List[PrimeTimeAction]]]:
         """
         Получение следующего окна прайм-тайма для указанных типов действий
+        ИСПРАВЛЕНО: Пропускает периоды обновления заданий
 
         Args:
             action_types: Список типов действий для поиска
@@ -291,8 +351,8 @@ class PrimeTimeManager:
                     microsecond=0
                 )
 
-                # Если это время еще не прошло
-                if action_time > from_time:
+                # Если это время еще не прошло И не период обновления
+                if action_time > from_time and not self.is_maintenance_period(action_time):
                     # Собираем все действия в это же время
                     concurrent_actions = [
                         a for a in day_actions
@@ -303,9 +363,10 @@ class PrimeTimeManager:
         return None
 
     def should_wait_for_prime_time(self, action_types: List[str],
-                                   max_wait_hours: float = 2.0) -> Tuple[bool, Optional[datetime]]:
+                                   max_wait_hours: Optional[float] = None) -> Tuple[bool, Optional[datetime]]:
         """
         Определение стоит ли ждать прайм-тайм для указанных действий
+        ИСПРАВЛЕНО: Учитывает периоды обновления заданий
 
         Args:
             action_types: Типы действий для проверки
@@ -314,6 +375,9 @@ class PrimeTimeManager:
         Returns:
             Кортеж (стоит_ждать, время_прайм_тайма)
         """
+        if max_wait_hours is None:
+            max_wait_hours = self.settings['max_wait_hours']
+
         next_window = self.get_next_prime_window(action_types)
 
         if not next_window:
@@ -321,6 +385,11 @@ class PrimeTimeManager:
 
         next_time, actions = next_window
         current_time = datetime.now()
+
+        # КРИТИЧНО: Проверяем не в периоде ли обновления текущее время
+        if self.is_maintenance_period(current_time):
+            logger.debug("Сейчас период обновления - можно подождать до прайм-тайма")
+
         wait_time = (next_time - current_time).total_seconds() / 3600  # В часах
 
         if wait_time <= max_wait_hours:
@@ -356,9 +425,10 @@ class PrimeTimeManager:
         return self.prime_times.get(action_type, [])
 
     def is_prime_time_active(self, action_types: List[str],
-                             tolerance_minutes: int = 5) -> Tuple[bool, List[PrimeTimeAction]]:
+                             tolerance_minutes: Optional[int] = None) -> Tuple[bool, List[PrimeTimeAction]]:
         """
         Проверка активен ли сейчас прайм-тайм для указанных действий
+        ИСПРАВЛЕНО: Учитывает периоды обновления заданий
 
         Args:
             action_types: Типы действий для проверки
@@ -367,7 +437,16 @@ class PrimeTimeManager:
         Returns:
             Кортеж (активен, список_активных_действий)
         """
+        if tolerance_minutes is None:
+            tolerance_minutes = self.settings['tolerance_minutes']
+
         current_time = datetime.now()
+
+        # КРИТИЧНО: Проверяем период обновления заданий
+        if self.is_maintenance_period(current_time):
+            logger.debug(f"Период обновления {current_time.strftime('%H:%M')} - прайм-тайм НЕ активен")
+            return False, []
+
         active_actions = []
 
         for action_type in action_types:
@@ -395,33 +474,41 @@ class PrimeTimeManager:
     def get_priority_bonus_for_action(self, action_type: str) -> int:
         """
         Получение бонуса приоритета для действия в прайм-тайм
+        ИСПРАВЛЕНО: Учитывает периоды обновления заданий
 
         Args:
             action_type: Тип действия
 
         Returns:
-            Бонус приоритета (0 если не в прайм-тайм)
+            Бонус приоритета (0 если не в прайм-тайм или период обновления)
         """
+        # КРИТИЧНО: Проверяем период обновления заданий
+        if self.is_maintenance_period():
+            return 0
+
         is_active, active_actions = self.is_prime_time_active([action_type])
 
         if is_active:
-            # Возвращаем бонус в зависимости от важности действия
-            priority_bonuses = {
-                'building_power': 200,  # Высокий приоритет для строительства
-                'evolution_bonus': 150,  # Средний приоритет для эволюции
-                'training_bonus': 100,  # Базовый бонус для тренировки
-                'resource_bonus': 100,  # Базовый бонус для ресурсов
-                'special_services': 80,  # Ниже для спецуслуг
-                'wild_bonus': 60,  # Низкий для дикой природы
-                'speedup_bonus': 50  # Минимальный для ускорений
-            }
+            # Возвращаем бонус из настроек или по умолчанию
+            priority_bonuses = self.settings.get('priority_bonuses', {
+                'building_power': 200,
+                'evolution_bonus': 150,
+                'training_bonus': 100,
+                'resource_bonus': 100,
+                'special_services': 80,
+                'wild_bonus': 60,
+                'speedup_bonus': 50,
+                'general_bonus': 40
+            })
             return priority_bonuses.get(action_type, 50)
 
         return 0
 
     def get_status_summary(self) -> Dict[str, Any]:
         """Получение сводки по статусу прайм-таймов"""
+        current_time = datetime.now()
         current_actions = self.get_current_prime_actions()
+        is_maintenance = self.is_maintenance_period()
 
         # Ищем ближайшие прайм-таймы
         all_action_types = list(self.prime_times.keys())
@@ -432,6 +519,8 @@ class PrimeTimeManager:
             'action_types': list(self.prime_times.keys()),
             'current_active': len(current_actions),
             'current_actions': [str(action) for action in current_actions],
+            'is_maintenance_period': is_maintenance,
+            'current_time': current_time.strftime('%H:%M'),
             'next_prime_time': None,
             'next_actions': []
         }
