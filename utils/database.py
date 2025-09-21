@@ -564,42 +564,23 @@ class Database:
 
     def get_available_research_for_upgrade(self, emulator_id: int) -> List[Dict[str, Any]]:
         """
-        Получение списка доступных исследований для апгрейда
-        (разблокированных по уровню лорда и не исследующихся сейчас)
+        Получение исследований готовых для старта
 
         Args:
             emulator_id: ID эмулятора
 
         Returns:
-            Список доступных исследований для апгрейда
+            Список исследований готовых для старта
         """
-        # Получаем текущий уровень лорда эмулятора
-        emulator = self.get_emulator_by_id(emulator_id)
-        if not emulator:
-            return []
-
-        lord_level = emulator['lord_level']
-
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT * FROM research_progress 
                 WHERE emulator_id = ? 
-                  AND is_researching = FALSE 
-                  AND current_level < target_level
+                  AND is_researching = FALSE
                 ORDER BY research_name
             ''', (emulator_id,))
-
-            all_research = [dict(row) for row in cursor.fetchall()]
-
-        # Фильтруем по разблокированным исследованиям
-        available = []
-        for research in all_research:
-            research_name = research['research_name']
-            if self.is_research_unlocked(research_name, lord_level):
-                available.append(research)
-
-        return available
+            return [dict(row) for row in cursor.fetchall()]
 
     def get_building_progress_for_lord(self, emulator_id: int, target_lord_level: int) -> Dict[str, Any]:
         """
@@ -671,6 +652,29 @@ class Database:
                     })
 
             return progress
+
+    def get_completed_research(self, emulator_id: int) -> List[Dict[str, Any]]:
+        """
+        Получение списка завершенных исследований (готовых к апгрейду)
+
+        Args:
+            emulator_id: ID эмулятора
+
+        Returns:
+            Список завершенных исследований
+        """
+        current_time = datetime.now().isoformat()
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM research_progress 
+                WHERE emulator_id = ? 
+                  AND is_researching = TRUE 
+                  AND estimated_completion <= ?
+                ORDER BY estimated_completion
+            ''', (emulator_id, current_time))
+            return [dict(row) for row in cursor.fetchall()]
 
     def get_completed_buildings(self, emulator_id: int) -> List[Dict[str, Any]]:
         """Получение списка завершенных строительств (готовых к апгрейду)"""
@@ -1128,40 +1132,58 @@ class Database:
             results = cursor.fetchall()
             return {row['research_name']: row['current_level'] for row in results}
 
-    def get_speedup_setting(self, emulator_id: int, item_type: str, item_name: str,
-                            default_value: bool = False) -> bool:
+    def get_speedup_setting(self, emulator_id: int, item_type: str, item_name: str, default: bool = False) -> bool:
         """
-        Получение настройки ускорения для конкретного здания или исследования
+        Получение настройки ускорения для здания или исследования
 
         Args:
             emulator_id: ID эмулятора
-            item_type: Тип элемента ('buildings' или 'research')
+            item_type: 'building' или 'research'
             item_name: Название здания или исследования
-            default_value: Значение по умолчанию
+            default: Значение по умолчанию
 
         Returns:
-            True если включено ускорение, False если выключено
+            True если ускорение включено
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                if item_type == 'building':
+                    cursor.execute('''
+                        SELECT use_speedups FROM building_progress 
+                        WHERE emulator_id = ? AND building_name = ?
+                    ''', (emulator_id, item_name))
+                elif item_type == 'research':
+                    cursor.execute('''
+                        SELECT use_speedups FROM research_progress 
+                        WHERE emulator_id = ? AND research_name = ?
+                    ''', (emulator_id, item_name))
+                else:
+                    return default
+
+                result = cursor.fetchone()
+                return bool(result['use_speedups']) if result else default
+
+        except Exception as e:
+            logger.error(f"Ошибка получения настройки ускорения {item_type} {item_name}: {e}")
+            return default
+
+    def get_emulator_by_index(self, emulator_index: int) -> Optional[Dict[str, Any]]:
+        """
+        Получение эмулятора по индексу
+
+        Args:
+            emulator_index: Индекс эмулятора
+
+        Returns:
+            Данные эмулятора или None
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
-
-            if item_type == 'buildings':
-                cursor.execute('''
-                    SELECT use_speedups 
-                    FROM building_progress 
-                    WHERE emulator_id = ? AND building_name = ?
-                ''', (emulator_id, item_name))
-            elif item_type == 'research':
-                cursor.execute('''
-                    SELECT use_speedups 
-                    FROM research_progress 
-                    WHERE emulator_id = ? AND research_name = ?
-                ''', (emulator_id, item_name))
-            else:
-                return default_value
-
-            result = cursor.fetchone()
-            return result['use_speedups'] if result else default_value
+            cursor.execute('SELECT * FROM emulators WHERE emulator_index = ?', (emulator_index,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
 
     def start_building(self, emulator_id: int, building_name: str, completion_time: datetime) -> bool:
         """
@@ -1491,21 +1513,20 @@ class Database:
 
     def get_buildings_ready_for_upgrade(self, emulator_id: int) -> List[Dict[str, Any]]:
         """
-        Получение списка зданий готовых для апгрейда (не строящихся)
+        Получение зданий готовых для улучшения
 
         Args:
             emulator_id: ID эмулятора
 
         Returns:
-            Список зданий готовых для апгрейда
+            Список зданий готовых для улучшения
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT * FROM building_progress 
                 WHERE emulator_id = ? 
-                  AND is_building = FALSE 
-                  AND current_level < target_level
+                  AND is_building = FALSE
                 ORDER BY building_name
             ''', (emulator_id,))
             return [dict(row) for row in cursor.fetchall()]

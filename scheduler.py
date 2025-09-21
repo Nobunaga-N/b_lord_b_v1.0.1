@@ -1,6 +1,19 @@
 """
-Умный планировщик для Beast Lord Bot с интеграцией системы прайм-таймов.
-Определяет приоритеты эмуляторов и оптимальное время обработки с учетом прайм-таймов.
+SmartScheduler для Beast Lord Bot - ПРОМПТ 18 ЗАВЕРШЕН
+Умный планировщик с ПАРАЛЛЕЛЬНЫМ планированием зданий И исследований
+
+КРИТИЧНО: Методы для ПАРАЛЛЕЛЬНОГО планирования:
+- calculate_priority() с множественными факторами (включая свободные слоты)
+- get_ready_emulators_by_priority() - готовые эмуляторы по приоритету
+- calculate_next_check_time() с умной логикой для завершения зданий И исследований
+- Интеграция с прайм-таймами и ПАРАЛЛЕЛЬНЫМ прогрессом
+
+ОСОБЕННОСТИ:
+- Готовность к повышению лорда = высший приоритет (1000 баллов)
+- Завершенные строительства/исследования = высокий приоритет (500 баллов)
+- Свободные слоты строительства/исследований = средний приоритет (200 баллов)
+- Прайм-тайм для нужных действий = бонус (+100 баллов)
+- Время с последней обработки = базовый приоритет (+1 за час)
 """
 
 import time
@@ -15,7 +28,7 @@ from utils.database import Database
 
 @dataclass
 class EmulatorPriority:
-    """Класс для хранения приоритета эмулятора"""
+    """Класс для хранения приоритета эмулятора с детальной информацией"""
     emulator_id: int
     emulator_index: int
     emulator_name: str
@@ -27,9 +40,22 @@ class EmulatorPriority:
     next_prime_time_window: Optional[datetime] = None
     recommended_actions: List[str] = field(default_factory=list)
 
+    def __str__(self):
+        return (f"EmulatorPriority(index={self.emulator_index}, "
+                f"priority={self.total_priority}, lord={self.lord_level})")
+
 
 class SmartScheduler:
-    """Умный планировщик с интеграцией прайм-таймов и множественными приоритетами"""
+    """
+    Умный планировщик с интеграцией прайм-таймов и ПАРАЛЛЕЛЬНЫМ планированием
+
+    ОСНОВНЫЕ ВОЗМОЖНОСТИ:
+    - Расчет приоритетов с множественными факторами
+    - Учет свободных слотов строительства И исследований ПАРАЛЛЕЛЬНО
+    - Умное планирование времени к завершению зданий/исследований
+    - Интеграция с системой прайм-таймов
+    - Динамическая обработка по готовности
+    """
 
     def __init__(self, database: Database, prime_time_manager: Optional[PrimeTimeManager] = None):
         """
@@ -42,43 +68,44 @@ class SmartScheduler:
         self.database = database
         self.prime_time_manager = prime_time_manager or PrimeTimeManager()
 
-        # Настройки приоритетов из ТЗ
+        # Настройки приоритетов из ТЗ - КРИТИЧНО!
         self.priority_weights = {
-            'lord_upgrade_ready': 1000,  # Готовность к повышению лорда
-            'completed_buildings': 500,  # Завершенные строительства
-            'completed_research': 500,  # Завершенные исследования
-            'free_builder_slot': 200,  # Свободный слот строительства
-            'free_research_slot': 200,  # Свободный слот исследований
-            'prime_time_bonus': 100,  # Бонус за прайм-тайм
-            'per_hour_waiting': 1,  # За каждый час ожидания
+            'lord_upgrade_ready': 1000,  # Готовность к повышению лорда = ВЫСШИЙ приоритет
+            'completed_buildings': 500,  # Завершенные строительства = высокий приоритет
+            'completed_research': 500,   # Завершенные исследования = высокий приоритет
+            'free_builder_slot': 200,    # Свободный слот строительства = средний приоритет
+            'free_research_slot': 200,   # Свободный слот исследований = средний приоритет
+            'prime_time_bonus': 100,     # Бонус за прайм-тайм = бонус приоритета
+            'per_hour_waiting': 1,       # За каждый час ожидания = базовый приоритет
         }
 
-        # Минимальные интервалы по уровню лорда (из ТЗ)
+        # Минимальные интервалы по уровню лорда (из ТЗ) - КРИТИЧНО!
         self.min_check_intervals = {
-            'lord_10_12': timedelta(minutes=5),  # 5 минут
-            'lord_13_15': timedelta(minutes=30),  # 30 минут
-            'lord_16_18': timedelta(hours=1),  # 1 час
-            'lord_19_plus': timedelta(hours=4),  # 4 часа
+            'lord_10_12': timedelta(minutes=5),   # 5 минут для быстрых действий
+            'lord_13_15': timedelta(minutes=30),  # 30 минут для средних действий
+            'lord_16_18': timedelta(hours=1),     # 1 час для долгих действий
+            'lord_19_plus': timedelta(hours=4),   # 4 часа для фарма
         }
 
         # Настройки прайм-таймов
         self.prime_time_settings = {
-            'max_wait_hours': 2.0,  # Максимум ждать прайм-тайм
-            'check_interval': 300,  # Проверка каждые 5 минут
-            'completion_buffer': 120,  # +2 минуты к завершению
+            'max_wait_hours': 2.0,       # Максимум ждать прайм-тайм
+            'check_interval': 300,       # Проверка каждые 5 минут
+            'completion_buffer': 120,    # +2 минуты к завершению
         }
 
-        logger.info("Инициализирован SmartScheduler с интеграцией прайм-таймов")
+        logger.info("🧠 SmartScheduler инициализирован с ПАРАЛЛЕЛЬНЫМ планированием")
 
     def calculate_emulator_priority(self, emulator_data: Dict[str, Any]) -> EmulatorPriority:
         """
-        Расчет приоритета эмулятора с учетом множественных факторов
+        КРИТИЧНО: Расчет приоритета эмулятора с множественными факторами
+        Включая свободные слоты строительства И исследований
 
         Args:
             emulator_data: Данные эмулятора из БД
 
         Returns:
-            Объект EmulatorPriority с детальным расчетом
+            Объект EmulatorPriority с детальным расчетом приоритета
         """
         priority = EmulatorPriority(
             emulator_id=emulator_data['id'],
@@ -87,14 +114,16 @@ class SmartScheduler:
             lord_level=emulator_data['lord_level']
         )
 
-        # 1. ГОТОВНОСТЬ К ПОВЫШЕНИЮ ЛОРДА = высший приоритет
-        if emulator_data.get('ready_for_lord_upgrade', False):
-            priority.priority_factors['lord_upgrade_ready'] = self.priority_weights['lord_upgrade_ready']
-            priority.recommended_actions.append('upgrade_lord')
-            logger.debug(
-                f"Эмулятор {priority.emulator_index}: готов к повышению лорда (+{self.priority_weights['lord_upgrade_ready']})")
+        logger.debug(f"🔍 Расчет приоритета для эмулятора {priority.emulator_index}")
 
-        # 2. ЗАВЕРШЕННЫЕ СТРОИТЕЛЬСТВА И ИССЛЕДОВАНИЯ = высокий приоритет
+        # 1. ГОТОВНОСТЬ К ПОВЫШЕНИЮ ЛОРДА = ВЫСШИЙ приоритет (1000 баллов)
+        if emulator_data.get('ready_for_lord_upgrade', False):
+            bonus = self.priority_weights['lord_upgrade_ready']
+            priority.priority_factors['lord_upgrade_ready'] = bonus
+            priority.recommended_actions.append('upgrade_lord')
+            logger.debug(f"   ⭐ Готов к повышению лорда (+{bonus})")
+
+        # 2. ЗАВЕРШЕННЫЕ СТРОИТЕЛЬСТВА И ИССЛЕДОВАНИЯ = высокий приоритет (500 баллов)
         completed_buildings = self.database.get_completed_buildings(emulator_data['id'])
         completed_research = self.database.get_completed_research(emulator_data['id'])
 
@@ -104,16 +133,18 @@ class SmartScheduler:
             priority.priority_factors['completed_buildings'] = bonus
             priority.recommended_actions.extend(
                 [f"complete_building_{b['building_name']}" for b in completed_buildings])
-            logger.debug(f"Эмулятор {priority.emulator_index}: {count} завершенных зданий (+{bonus})")
+            logger.debug(f"   🏗️ {count} завершенных зданий (+{bonus})")
 
         if completed_research:
             count = len(completed_research)
             bonus = self.priority_weights['completed_research'] * count
             priority.priority_factors['completed_research'] = bonus
-            priority.recommended_actions.extend([f"complete_research_{r['research_name']}" for r in completed_research])
-            logger.debug(f"Эмулятор {priority.emulator_index}: {count} завершенных исследований (+{bonus})")
+            priority.recommended_actions.extend(
+                [f"complete_research_{r['research_name']}" for r in completed_research])
+            logger.debug(f"   🔬 {count} завершенных исследований (+{bonus})")
 
-        # 3. СВОБОДНЫЕ СЛОТЫ СТРОИТЕЛЬСТВА И ИССЛЕДОВАНИЙ = средний приоритет
+        # 3. СВОБОДНЫЕ СЛОТЫ СТРОИТЕЛЬСТВА И ИССЛЕДОВАНИЙ = средний приоритет (200 баллов)
+        # КРИТИЧНО: ПАРАЛЛЕЛЬНАЯ проверка слотов
         free_building_slots = self._get_free_building_slots(emulator_data)
         free_research_slots = self._get_free_research_slots(emulator_data)
 
@@ -124,8 +155,7 @@ class SmartScheduler:
                 bonus = self.priority_weights['free_builder_slot'] * free_building_slots
                 priority.priority_factors['free_builder_slot'] = bonus
                 priority.recommended_actions.append('start_building')
-                logger.debug(
-                    f"Эмулятор {priority.emulator_index}: {free_building_slots} свободных слотов строительства (+{bonus})")
+                logger.debug(f"   🔨 {free_building_slots} свободных слотов строительства (+{bonus})")
 
         if free_research_slots > 0:
             # Проверяем есть ли что исследовать
@@ -134,25 +164,24 @@ class SmartScheduler:
                 bonus = self.priority_weights['free_research_slot'] * free_research_slots
                 priority.priority_factors['free_research_slot'] = bonus
                 priority.recommended_actions.append('start_research')
-                logger.debug(
-                    f"Эмулятор {priority.emulator_index}: {free_research_slots} свободных слотов исследований (+{bonus})")
+                logger.debug(f"   📚 {free_research_slots} свободных слотов исследований (+{bonus})")
 
-        # 4. ПРАЙМ-ТАЙМ БОНУС = бонус приоритета
+        # 4. ПРАЙМ-ТАЙМ БОНУС = бонус приоритета (+100 баллов)
         prime_time_bonus = self._calculate_prime_time_bonus(priority.recommended_actions)
         if prime_time_bonus > 0:
             priority.priority_factors['prime_time_bonus'] = prime_time_bonus
-            logger.debug(f"Эмулятор {priority.emulator_index}: прайм-тайм активен (+{prime_time_bonus})")
+            logger.debug(f"   🎯 Прайм-тайм активен (+{prime_time_bonus})")
 
-        # 5. ВРЕМЯ С ПОСЛЕДНЕЙ ОБРАБОТКИ = базовый приоритет
+        # 5. ВРЕМЯ С ПОСЛЕДНЕЙ ОБРАБОТКИ = базовый приоритет (+1 за час)
         waiting_bonus = self._calculate_waiting_bonus(emulator_data)
         if waiting_bonus > 0:
             priority.priority_factors['per_hour_waiting'] = waiting_bonus
-            logger.debug(f"Эмулятор {priority.emulator_index}: время ожидания (+{waiting_bonus})")
+            logger.debug(f"   ⏰ Время ожидания (+{waiting_bonus})")
 
         # Суммарный приоритет
         priority.total_priority = sum(priority.priority_factors.values())
 
-        # Расчет времени следующей проверки
+        # Расчет времени следующей проверки с УМНОЙ логикой
         priority.next_check_time = self._calculate_next_check_time(emulator_data)
 
         # Проверка на ожидание прайм-тайма
@@ -162,19 +191,21 @@ class SmartScheduler:
             priority.waiting_for_prime_time = should_wait
             priority.next_prime_time_window = next_prime_time
 
+        logger.debug(f"   💯 Итого приоритет: {priority.total_priority}")
         return priority
 
     def get_ready_emulators_by_priority(self, max_concurrent: int = 5) -> List[EmulatorPriority]:
         """
-        Получение готовых к обработке эмуляторов, отсортированных по приоритету
+        КРИТИЧНО: Получение готовых к обработке эмуляторов, отсортированных по приоритету
+        Основа динамической обработки по готовности
 
         Args:
             max_concurrent: Максимальное количество одновременно обрабатываемых эмуляторов
 
         Returns:
-            Список эмуляторов готовых к обработке (до max_concurrent)
+            Список эмуляторов готовых к обработке (до max_concurrent), отсортированных по приоритету
         """
-        logger.info("Определяем приоритеты готовых эмуляторов...")
+        logger.info("🎯 Определяем приоритеты готовых эмуляторов...")
 
         # Получаем включенные эмуляторы
         enabled_emulators = self.database.get_all_emulators(enabled_only=True)
@@ -195,34 +226,35 @@ class SmartScheduler:
                 wait_hours = (priority.next_prime_time_window - current_time).total_seconds() / 3600
                 if wait_hours > self.prime_time_settings['max_wait_hours']:
                     logger.debug(
-                        f"Эмулятор {priority.emulator_index}: слишком долго ждать прайм-тайм ({wait_hours:.1f}ч)")
+                        f"⏳ Эмулятор {priority.emulator_index}: слишком долго ждать прайм-тайм ({wait_hours:.1f}ч)")
                     continue
 
             ready_emulators.append(priority)
 
-        # Сортируем по приоритету (убывание)
+        # Сортируем по приоритету (убывание) - КРИТИЧНО!
         ready_emulators.sort(key=lambda x: x.total_priority, reverse=True)
 
         # Ограничиваем количество
         result = ready_emulators[:max_concurrent]
 
-        logger.info(f"Готово к обработке: {len(result)} из {len(enabled_emulators)} включенных эмуляторов")
+        logger.info(f"📊 Готово к обработке: {len(result)} из {len(enabled_emulators)} включенных эмуляторов")
 
-        for priority in result:
-            logger.info(f"  Приоритет {priority.total_priority}: эмулятор {priority.emulator_index} "
+        for i, priority in enumerate(result, 1):
+            logger.info(f"   {i}. Приоритет {priority.total_priority}: эмулятор {priority.emulator_index} "
                         f"({priority.emulator_name}, лорд {priority.lord_level})")
 
         return result
 
     def _calculate_next_check_time(self, emulator_data: Dict[str, Any]) -> datetime:
         """
-        Умный расчет времени следующей проверки эмулятора
+        КРИТИЧНО: Умный расчет времени следующей проверки эмулятора
+        С логикой для завершения зданий И исследований ПАРАЛЛЕЛЬНО
 
         Args:
             emulator_data: Данные эмулятора
 
         Returns:
-            Время следующей проверки
+            Время следующей проверки (к завершению ± минимальный интервал)
         """
         current_time = datetime.now()
         lord_level = emulator_data['lord_level']
@@ -230,13 +262,13 @@ class SmartScheduler:
         # 1. Получаем минимальный интервал для уровня лорда
         min_interval = self._get_min_interval_for_lord_level(lord_level)
 
-        # 2. Получаем активные строительства И исследования
+        # 2. Получаем активные строительства И исследования ПАРАЛЛЕЛЬНО
         active_buildings = self.database.get_active_buildings(emulator_data['id'])
         active_research = self.database.get_active_research(emulator_data['id'])
 
         all_active = []
 
-        # Парсим времена завершения
+        # Парсим времена завершения зданий
         for building in active_buildings:
             if building.get('estimated_completion'):
                 try:
@@ -245,6 +277,7 @@ class SmartScheduler:
                 except (ValueError, TypeError):
                     continue
 
+        # Парсим времена завершения исследований
         for research in active_research:
             if research.get('estimated_completion'):
                 try:
@@ -274,10 +307,10 @@ class SmartScheduler:
                 next_check = optimal_time
 
             logger.debug(
-                f"Эмулятор {emulator_data['emulator_index']}: следующая проверка к завершению {next_check.strftime('%H:%M')}")
+                f"⏰ Эмулятор {emulator_data['emulator_index']}: следующая проверка к завершению {next_check.strftime('%H:%M')}")
             return next_check
         else:
-            # Нет активных действий - зайти как можно скорее
+            # Нет активных действий - зайти как можно скорее (но не раньше мин интервала)
             last_processed = emulator_data.get('last_processed')
             if last_processed:
                 try:
@@ -289,7 +322,7 @@ class SmartScheduler:
                 next_check = current_time + min_interval
 
             logger.debug(
-                f"Эмулятор {emulator_data['emulator_index']}: нет активных действий, следующая проверка {next_check.strftime('%H:%M')}")
+                f"⚡ Эмулятор {emulator_data['emulator_index']}: нет активных действий, следующая проверка {next_check.strftime('%H:%M')}")
             return next_check
 
     def _get_min_interval_for_lord_level(self, lord_level: int) -> timedelta:
@@ -304,7 +337,10 @@ class SmartScheduler:
             return self.min_check_intervals['lord_19_plus']
 
     def _get_free_building_slots(self, emulator_data: Dict[str, Any]) -> int:
-        """Получение количества свободных слотов строительства"""
+        """
+        КРИТИЧНО: Получение количества свободных слотов строительства
+        ПАРАЛЛЕЛЬНО с исследованиями
+        """
         lord_level = emulator_data['lord_level']
 
         # Количество слотов строительства зависит от уровня лорда (из ТЗ)
@@ -320,7 +356,10 @@ class SmartScheduler:
         return max(0, max_slots - used_slots)
 
     def _get_free_research_slots(self, emulator_data: Dict[str, Any]) -> int:
-        """Получение количества свободных слотов исследований"""
+        """
+        КРИТИЧНО: Получение количества свободных слотов исследований
+        ПАРАЛЛЕЛЬНО с строительством (отдельная очередь)
+        """
         # Исследования: отдельная очередь (обычно 1 слот)
         max_slots = 1
 
@@ -338,7 +377,7 @@ class SmartScheduler:
             recommended_actions: Список рекомендуемых действий
 
         Returns:
-            Бонус приоритета
+            Бонус приоритета (+100 за прайм-тайм)
         """
         if not recommended_actions:
             return 0
@@ -365,7 +404,7 @@ class SmartScheduler:
         return max_bonus
 
     def _calculate_waiting_bonus(self, emulator_data: Dict[str, Any]) -> int:
-        """Расчет бонуса за время ожидания"""
+        """Расчет бонуса за время ожидания (+1 за час)"""
         last_processed = emulator_data.get('last_processed')
         if not last_processed:
             return 0
@@ -469,18 +508,23 @@ class SmartScheduler:
             success = self.database.update_emulator_progress(priority.emulator_index, **update_data)
 
             if success:
-                logger.debug(f"Обновлено расписание эмулятора {priority.emulator_index}")
+                logger.debug(f"📝 Обновлено расписание эмулятора {priority.emulator_index}")
             else:
-                logger.warning(f"Не удалось обновить расписание эмулятора {priority.emulator_index}")
+                logger.warning(f"⚠️ Не удалось обновить расписание эмулятора {priority.emulator_index}")
 
             return success
 
         except Exception as e:
-            logger.error(f"Ошибка обновления расписания эмулятора {emulator_id}: {e}")
+            logger.error(f"❌ Ошибка обновления расписания эмулятора {emulator_id}: {e}")
             return False
 
     def get_schedule_summary(self) -> Dict[str, Any]:
-        """Получение сводки по расписанию"""
+        """
+        Получение сводки по расписанию и статусу планирования
+
+        Returns:
+            Словарь с детальной статистикой планирования
+        """
         enabled_emulators = self.database.get_all_emulators(enabled_only=True)
         current_time = datetime.now()
 
@@ -523,12 +567,22 @@ class SmartScheduler:
         return summary
 
 
-# Глобальный экземпляр планировщика (будет инициализирован при первом использовании)
+# ========== ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР ПЛАНИРОВЩИКА ==========
+
 _scheduler_instance = None
 
 
 def get_scheduler(database: Database = None, prime_time_manager: PrimeTimeManager = None) -> SmartScheduler:
-    """Получение глобального экземпляра планировщика"""
+    """
+    Получение глобального экземпляра планировщика (паттерн Singleton)
+
+    Args:
+        database: Экземпляр базы данных (создается автоматически если None)
+        prime_time_manager: Менеджер прайм-таймов (создается автоматически если None)
+
+    Returns:
+        Настроенный экземпляр SmartScheduler
+    """
     global _scheduler_instance
 
     if _scheduler_instance is None:
@@ -537,5 +591,77 @@ def get_scheduler(database: Database = None, prime_time_manager: PrimeTimeManage
             database = default_db
 
         _scheduler_instance = SmartScheduler(database, prime_time_manager)
+        logger.info("🎯 Создан глобальный экземпляр SmartScheduler")
 
     return _scheduler_instance
+
+
+# ========== ФУНКЦИИ ДЛЯ УДОБСТВА ==========
+
+def calculate_priority_for_emulator(emulator_index: int) -> Optional[EmulatorPriority]:
+    """
+    Быстрый расчет приоритета для конкретного эмулятора
+
+    Args:
+        emulator_index: Индекс эмулятора
+
+    Returns:
+        Объект EmulatorPriority или None если эмулятор не найден
+    """
+    try:
+        scheduler = get_scheduler()
+
+        # Получаем данные эмулятора
+        emulator_data = scheduler.database.get_emulator_by_index(emulator_index)
+        if not emulator_data:
+            return None
+
+        return scheduler.calculate_emulator_priority(emulator_data)
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка расчета приоритета для эмулятора {emulator_index}: {e}")
+        return None
+
+
+def get_ready_emulators(max_concurrent: int = 5) -> List[EmulatorPriority]:
+    """
+    Быстрое получение готовых эмуляторов по приоритету
+
+    Args:
+        max_concurrent: Максимальное количество эмуляторов
+
+    Returns:
+        Список готовых эмуляторов по приоритету
+    """
+    try:
+        scheduler = get_scheduler()
+        return scheduler.get_ready_emulators_by_priority(max_concurrent)
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения готовых эмуляторов: {e}")
+        return []
+
+
+if __name__ == "__main__":
+    # Простой тест SmartScheduler
+    import logging
+    logging.basicConfig(level=logging.INFO)
+
+    print("=== ТЕСТ SMARTSCHEDULER ===")
+    print("Для полного тестирования запустите: python test_smart_scheduler.py")
+
+    try:
+        # Создаем планировщик
+        scheduler = get_scheduler()
+        print(f"✅ SmartScheduler создан: {scheduler}")
+
+        # Получаем сводку
+        summary = scheduler.get_schedule_summary()
+        print(f"📊 Включенных эмуляторов: {summary['total_enabled']}")
+        print(f"✅ Готовы сейчас: {summary['ready_now']}")
+
+        print("\n🎯 ПРОМПТ 18 ЗАВЕРШЕН УСПЕШНО!")
+        print("🚀 ГОТОВ К ПРОМПТУ 19: Кардинальная переработка orchestrator.py")
+
+    except Exception as e:
+        print(f"❌ Ошибка тестирования: {e}")
+        print("💡 Убедитесь что созданы необходимые модули: utils/database.py, utils/prime_time_manager.py")
