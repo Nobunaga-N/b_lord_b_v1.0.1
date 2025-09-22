@@ -1,131 +1,170 @@
+#!/usr/bin/env python3
 """
-Кардинально переработанный оркестратор для управления эмуляторами Beast Lord Bot.
-Предоставляет CLI интерфейс и динамическую обработку эмуляторов по готовности.
+КАРДИНАЛЬНО ПЕРЕРАБОТАННЫЙ ORCHESTRATOR.PY - ПРОМПТ 19
 
-КЛЮЧЕВЫЕ ОСОБЕННОСТИ:
-- Динамическая обработка по готовности (каждый эмулятор индивидуально)
-- Интеграция SmartLDConsole для управления жизненным циклом эмуляторов
-- Workflow: готовые → запуск → ПАРАЛЛЕЛЬНАЯ обработка → остановка
-- Максимум 5-8 одновременно (настраивается)
-- БЕЗ мониторинга системных ресурсов
+КРИТИЧЕСКИ ИСПРАВЛЕН:
+✅ CLI команды с правильной инициализацией orchestrator
+✅ Исправлено ожидание готовности эмулятора
+✅ Добавлена задержка перед проверкой статуса
+✅ Улучшена логика запуска эмуляторов
+
+Динамическая обработка эмуляторов по готовности.
+Workflow: получить готовые → запустить если слоты свободны →
+обработать ПАРАЛЛЕЛЬНО (здания + исследования) → остановить.
+БЕЗ мониторинга системных ресурсов.
 """
 
 import sys
 import time
+import click
 import threading
 from pathlib import Path
-from typing import List, Dict, Set
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Dict, Optional, Any
+from dataclasses import dataclass
 
-import click
+# Добавляем путь к проекту
+project_root = Path(__file__).parent
+sys.path.append(str(project_root))
+
 from loguru import logger
 from utils.emulator_discovery import EmulatorDiscovery
 from utils.smart_ldconsole import SmartLDConsole
-from scheduler import SmartScheduler, get_scheduler
 from utils.prime_time_manager import PrimeTimeManager
 from utils.database import database
+from scheduler import get_scheduler
+
+
+@dataclass
+class EmulatorSlot:
+    """Информация о слоте обработки эмулятора"""
+    status: str  # 'starting_emulator', 'processing_game', 'stopping_emulator', 'completed', 'error'
+    start_time: datetime
+    priority: object
+    future: Optional[object] = None
+    executor: Optional[ThreadPoolExecutor] = None
 
 
 class DynamicEmulatorProcessor:
     """
-    Динамический процессор эмуляторов.
-    Обрабатывает эмуляторы по готовности с умным управлением слотами.
+    🚀 ДИНАМИЧЕСКИЙ ПРОЦЕССОР ЭМУЛЯТОРОВ
+
+    Обрабатывает эмуляторы по готовности (НЕ батчи):
+    - Максимум N одновременно (настраивается)
+    - Умная очередь с приоритетами
+    - ПАРАЛЛЕЛЬНАЯ обработка зданий И исследований
     """
 
-    def __init__(self, orchestrator: 'Orchestrator', max_concurrent: int = 5):
+    def __init__(self, orchestrator, max_concurrent: int = 5):
         self.orchestrator = orchestrator
         self.max_concurrent = max_concurrent
         self.running = False
-        self.processing_thread = None
-
-        # Слоты активных эмуляторов
-        self.active_slots: Dict[int, dict] = {}  # {emulator_id: slot_info}
+        self.active_slots: Dict[int, EmulatorSlot] = {}
         self.slot_lock = threading.Lock()
+        self.processor_thread = None
 
         logger.info(f"Инициализирован DynamicEmulatorProcessor с {max_concurrent} слотами")
 
-    def start_processing(self):
+    def start_processing(self) -> bool:
         """Запуск динамической обработки эмуляторов"""
         if self.running:
             logger.warning("Обработка уже запущена")
             return False
 
+        logger.info("=== НАЧАЛО ДИНАМИЧЕСКОЙ ОБРАБОТКИ ЭМУЛЯТОРОВ ===")
+
+        # КРИТИЧНО: Синхронизируем эмуляторы перед запуском
+        logger.info("🔄 Синхронизация эмуляторов с базой данных...")
+        self._sync_emulators_to_database()
+
         self.running = True
-        self.processing_thread = threading.Thread(
+        self.processor_thread = threading.Thread(
             target=self._processing_loop,
             name="EmulatorProcessor",
             daemon=True
         )
-        self.processing_thread.start()
+        self.processor_thread.start()
 
         logger.success(f"🚀 Запущена динамическая обработка эмуляторов (макс {self.max_concurrent})")
         return True
 
-    def stop_processing(self):
-        """Остановка обработки эмуляторов"""
+    def stop_processing(self) -> bool:
+        """Остановка динамической обработки"""
         if not self.running:
-            logger.warning("Обработка уже остановлена")
+            logger.warning("Обработка не была запущена")
             return False
 
-        logger.info("Остановка обработки эмуляторов...")
+        logger.info("Останавливаем динамическую обработку...")
         self.running = False
 
-        # Ждем завершения потока
-        if self.processing_thread and self.processing_thread.is_alive():
-            self.processing_thread.join(timeout=30)
+        # Ждем завершения активных задач
+        with self.slot_lock:
+            for emulator_id, slot in self.active_slots.items():
+                if slot.future and not slot.future.done():
+                    logger.info(f"Ждем завершения обработки эмулятора {emulator_id}")
 
-        # Останавливаем все активные эмуляторы
-        self._stop_all_active_emulators()
+        # Ждем завершения основного потока
+        if self.processor_thread and self.processor_thread.is_alive():
+            self.processor_thread.join(timeout=5.0)
 
-        logger.success("✅ Обработка эмуляторов остановлена")
+        logger.success("✅ Динамическая обработка остановлена")
         return True
+
+    def get_status(self) -> Dict[str, Any]:
+        """Получение статуса процессора"""
+        with self.slot_lock:
+            active_emulators = list(self.active_slots.keys())
+            active_count = len(active_emulators)
+
+        return {
+            'running': self.running,
+            'max_concurrent': self.max_concurrent,
+            'active_slots': active_count,
+            'free_slots': self.max_concurrent - active_count,
+            'active_emulators': active_emulators
+        }
+
+    def _update_slot_status(self, emulator_id: int, status: str):
+        """Обновление статуса слота"""
+        with self.slot_lock:
+            if emulator_id in self.active_slots:
+                self.active_slots[emulator_id].status = status
 
     def _processing_loop(self):
         """Основной цикл динамической обработки"""
-        logger.info("=== НАЧАЛО ДИНАМИЧЕСКОЙ ОБРАБОТКИ ЭМУЛЯТОРОВ ===")
+        logger.info("🎯 Начат цикл динамической обработки")
 
         while self.running:
             try:
-                # 1. Освобождаем завершенные слоты
+                # 0. КРИТИЧНО: Синхронизируем эмуляторы между Discovery и Database
+                self._sync_emulators_to_database()
+
+                # 1. Убираем завершенные задачи
                 self._cleanup_completed_slots()
 
-                # 2. Проверяем свободные слоты
+                # 2. Определяем готовых эмуляторов по приоритету
                 free_slots = self.max_concurrent - len(self.active_slots)
-
                 if free_slots > 0:
-                    # 3. Получаем готовых эмуляторов по приоритету
                     ready_emulators = self.orchestrator.scheduler.get_ready_emulators_by_priority(free_slots)
 
-                    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Безопасная обработка ready_emulators
                     if ready_emulators:
-                        try:
-                            # Безопасная проверка - пробуем получить длину
-                            emulators_count = len(ready_emulators)
-                            logger.info(f"Свободных слотов: {free_slots}, готовых эмуляторов: {emulators_count}")
+                        logger.info(
+                            f"📊 Готово к обработке: {len(ready_emulators)} из {len(self.orchestrator.discovery.get_enabled_emulators())} включенных эмуляторов")
+                        for i, priority in enumerate(ready_emulators, 1):
+                            logger.info(
+                                f"   {i}. Приоритет {priority.total_priority}: эмулятор {priority.emulator_index} ({priority.emulator_name}, лорд {priority.lord_level})")
 
-                            # 4. Запускаем обработку готовых эмуляторов
-                            try:
-                                for priority in ready_emulators:
-                                    if len(self.active_slots) >= self.max_concurrent:
-                                        break  # Слоты заполнены
+                # 3. Запускаем обработку доступных эмуляторов
+                self._start_available_emulators(ready_emulators if free_slots > 0 else [])
 
-                                    self._start_emulator_processing(priority)
-                            except Exception as e:
-                                logger.error(f"Ошибка при итерации по ready_emulators: {e}")
-
-                        except (TypeError, AttributeError) as e:
-                            logger.error(f"Ошибка обработки ready_emulators: {type(ready_emulators)}, {e}")
-                    else:
-                        logger.info(f"Свободных слотов: {free_slots}, готовых эмуляторов: 0")
-
-                # 5. Показываем статус активных слотов
+                # 4. Показываем статус активных слотов
                 if self.active_slots:
                     logger.info(f"Активных слотов: {len(self.active_slots)}/{self.max_concurrent}")
                     for emu_id, slot_info in self.active_slots.items():
-                        logger.info(f"  Слот {emu_id}: {slot_info['status']} (с {slot_info['start_time']})")
+                        logger.info(f"  Слот {emu_id}: {slot_info.status} (с {slot_info.start_time})")
 
-                # 6. Пауза перед следующим циклом
+                # 5. Пауза перед следующим циклом
                 time.sleep(60)  # Проверяем каждую минуту
 
             except KeyboardInterrupt:
@@ -135,7 +174,52 @@ class DynamicEmulatorProcessor:
                 logger.error(f"Ошибка в цикле обработки: {e}")
                 time.sleep(60)
 
-    def _start_emulator_processing(self, priority):
+    def _cleanup_completed_slots(self):
+        """Очистка завершенных слотов"""
+        with self.slot_lock:
+            completed_emulators = []
+
+            for emulator_id, slot in list(self.active_slots.items()):
+                if slot.future and slot.future.done():
+                    completed_emulators.append(emulator_id)
+
+                    # Получаем результат и логируем
+                    try:
+                        result = slot.future.result()
+                        final_status = result.get('status', 'unknown')
+                        logger.info(f"Слот {emulator_id} завершен: {final_status}")
+                    except Exception as e:
+                        logger.error(f"Ошибка при получении результата слота {emulator_id}: {e}")
+
+                    # Закрываем executor
+                    if slot.executor:
+                        slot.executor.shutdown(wait=False)
+
+                    # Удаляем слот
+                    del self.active_slots[emulator_id]
+
+    def _start_available_emulators(self, ready_emulators: List[Any]):
+        """Запуск обработки доступных эмуляторов"""
+        with self.slot_lock:
+            free_slots = self.max_concurrent - len(self.active_slots)
+
+        if free_slots <= 0 or not ready_emulators:
+            return
+
+        logger.info(f"Свободных слотов: {free_slots}, готовых эмуляторов: {len(ready_emulators)}")
+
+        for priority in ready_emulators[:free_slots]:
+            emulator_id = priority.emulator_index
+
+            # Проверяем что слот свободен
+            with self.slot_lock:
+                if emulator_id in self.active_slots:
+                    continue
+
+            logger.info(f"🔄 Начало обработки эмулятора {emulator_id}")
+            self._start_emulator_processing(priority)
+
+    def _start_emulator_processing(self, priority: Any):
         """Запуск обработки одного эмулятора в отдельном потоке"""
         emulator_id = priority.emulator_index
 
@@ -145,12 +229,11 @@ class DynamicEmulatorProcessor:
                 return
 
             # Резервируем слот
-            self.active_slots[emulator_id] = {
-                'status': 'starting',
-                'start_time': datetime.now(),
-                'priority': priority,
-                'future': None
-            }
+            self.active_slots[emulator_id] = EmulatorSlot(
+                status='starting',
+                start_time=datetime.now(),
+                priority=priority
+            )
 
         # Запускаем в ThreadPoolExecutor
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"Emu{emulator_id}")
@@ -159,15 +242,15 @@ class DynamicEmulatorProcessor:
         # Сохраняем future для отслеживания
         with self.slot_lock:
             if emulator_id in self.active_slots:
-                self.active_slots[emulator_id]['future'] = future
-                self.active_slots[emulator_id]['executor'] = executor
+                self.active_slots[emulator_id].future = future
+                self.active_slots[emulator_id].executor = executor
 
         logger.info(f"🎯 Запущена обработка эмулятора {emulator_id} (приоритет {priority.total_priority})")
 
-    def _process_single_emulator(self, priority) -> dict:
+    def _process_single_emulator(self, priority: Any) -> Dict[str, Any]:
         """
-        Обработка одного эмулятора по workflow:
-        готовый → запуск → ПАРАЛЛЕЛЬНАЯ обработка → остановка
+        ИСПРАВЛЕННАЯ обработка одного эмулятора по workflow:
+        готовый → запуск (с правильным ожиданием) → ПАРАЛЛЕЛЬНАЯ обработка → остановка
         """
         emulator_id = priority.emulator_index
         start_time = datetime.now()
@@ -175,7 +258,7 @@ class DynamicEmulatorProcessor:
         try:
             logger.info(f"🔄 Начало обработки эмулятора {emulator_id}")
 
-            # ЭТАП 1: Запуск эмулятора
+            # ЭТАП 1: Запуск эмулятора (ИСПРАВЛЕНО)
             self._update_slot_status(emulator_id, 'starting_emulator')
 
             if not self.orchestrator.ldconsole.is_running(emulator_id):
@@ -183,9 +266,9 @@ class DynamicEmulatorProcessor:
                 if not self.orchestrator.ldconsole.start_emulator(emulator_id):
                     raise Exception("Не удалось запустить эмулятор")
 
-                # Ожидание готовности ADB
+                # ИСПРАВЛЕНИЕ: Ожидание готовности с увеличенным таймаутом
                 logger.info(f"Ожидание готовности ADB для эмулятора {emulator_id}...")
-                if not self.orchestrator.ldconsole.wait_emulator_ready(emulator_id, timeout=120):
+                if not self._wait_emulator_ready_fixed(emulator_id, timeout=120):
                     raise Exception("Эмулятор не готов к работе")
             else:
                 logger.info(f"Эмулятор {emulator_id} уже запущен")
@@ -245,200 +328,168 @@ class DynamicEmulatorProcessor:
                 'error': str(e)
             }
 
-    def _process_game_actions(self, priority) -> dict:
+    def _wait_emulator_ready_fixed(self, index: int, timeout: float = 120.0) -> bool:
+        """
+        ИСПРАВЛЕННОЕ ожидание готовности эмулятора
+
+        Ключевые исправления:
+        ✅ Начальная задержка 15 секунд перед проверкой
+        ✅ Более мягкая логика проверки is_running()
+        ✅ Фокус на ADB соединении, а не на статусе процесса
+        """
+        logger.info(f"Ожидаем готовности эмулятора {index} (таймаут: {timeout}с)")
+
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Даем эмулятору время на запуск
+        logger.info(f"Даем эмулятору {index} время на запуск (15с)...")
+        time.sleep(15.0)
+
+        start_time = time.time()
+        check_interval = 10.0  # Проверка каждые 10 секунд
+        adb_port = self.orchestrator.ldconsole.get_adb_port(index)
+
+        # Счетчик попыток для более мягкой проверки
+        not_running_count = 0
+        max_not_running = 3  # Разрешаем 3 неудачные проверки подряд
+
+        while time.time() - start_time < timeout:
+            # ИСПРАВЛЕНИЕ: Более мягкая проверка статуса процесса
+            if not self.orchestrator.ldconsole.is_running(index):
+                not_running_count += 1
+                if not_running_count >= max_not_running:
+                    logger.warning(f"Эмулятор {index} не запущен после {not_running_count} проверок")
+                    return False
+                else:
+                    logger.debug(f"Эмулятор {index} пока не готов (попытка {not_running_count}/{max_not_running})")
+            else:
+                # Эмулятор запущен, сбрасываем счетчик
+                not_running_count = 0
+
+            # Главная проверка: ADB подключение
+            if self.orchestrator.ldconsole.test_adb_connection(adb_port):
+                elapsed = time.time() - start_time
+                logger.success(f"Эмулятор {index} готов к работе через {elapsed:.1f}с")
+                return True
+
+            # Показываем прогресс
+            elapsed = time.time() - start_time
+            logger.info(f"Эмулятор {index} еще не готов, прошло {elapsed:.1f}с...")
+
+            # Ждем до следующей проверки
+            time.sleep(check_interval)
+
+        logger.error(f"Эмулятор {index} не готов после {timeout}с ожидания")
+        return False
+
+    def _sync_emulators_to_database(self):
+        """
+        КРИТИЧЕСКАЯ ФУНКЦИЯ: Синхронизация эмуляторов из EmulatorDiscovery в Database
+        Без этого планировщик не видит эмуляторы!
+        """
+        try:
+            # Получаем все эмуляторы из EmulatorDiscovery
+            discovery_emulators = self.orchestrator.discovery.get_emulators()
+
+            if not discovery_emulators:
+                logger.debug("Нет эмуляторов для синхронизации")
+                return
+
+            # Синхронизируем каждый эмулятор в БД
+            for emu_index, emu_info in discovery_emulators.items():
+                try:
+                    from utils.database import database
+                    database.sync_emulator(
+                        emulator_index=emu_index,
+                        emulator_name=emu_info.name,
+                        enabled=emu_info.enabled,
+                        notes=emu_info.notes
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка синхронизации эмулятора {emu_index}: {e}")
+
+            logger.debug(f"✅ Синхронизировано {len(discovery_emulators)} эмуляторов в БД")
+
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка синхронизации эмуляторов: {e}")
+
+    def _process_game_actions(self, priority: Any) -> Dict[str, Any]:
         """
         ПАРАЛЛЕЛЬНАЯ обработка игровых действий.
         Здесь будет интеграция с bot_worker.py в следующих промптах.
         """
         emulator_id = priority.emulator_index
 
-        # ЗАГЛУШКА для игровых действий
+        # ЗАГЛУШКА для тестирования
         logger.info(f"[ЗАГЛУШКА] ПАРАЛЛЕЛЬНАЯ обработка игровых действий для эмулятора {emulator_id}")
 
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Полностью безопасная обработка recommended_actions
-        recommended_actions = []
-        try:
-            # Получаем атрибут без isinstance проверки
-            raw_actions = getattr(priority, 'recommended_actions', None)
-
-            if raw_actions is None:
-                recommended_actions = []
-            else:
-                # Пробуем преобразовать к списку разными способами
-                try:
-                    # Пробуем итерировать (работает для списков, кортежей)
-                    recommended_actions = list(raw_actions)
-                except (TypeError, ValueError):
-                    # Если не итерируется, пробуем как строку
-                    try:
-                        recommended_actions = [str(raw_actions)]
-                    except:
-                        recommended_actions = []
-
-        except Exception as e:
-            logger.warning(f"Ошибка обработки recommended_actions: {e}")
-            recommended_actions = []
-
-        logger.info(f"  Рекомендуемые действия: {recommended_actions}")
-        logger.info(f"  Ожидание прайм-тайма: {getattr(priority, 'waiting_for_prime_time', False)}")
-
         # Имитируем обработку
-        time.sleep(2)  # Уменьшаем время для тестов
+        time.sleep(5)
 
-        # Безопасная обработка действий
-        actions_str = ''
-        if recommended_actions:
-            try:
-                actions_str = ' '.join(str(action) for action in recommended_actions)
-            except Exception as e:
-                logger.warning(f"Ошибка формирования строки действий: {e}")
-                actions_str = ''
-
+        # Имитируем результаты
         return {
-            'actions_completed': len(recommended_actions) if recommended_actions else 0,
-            'buildings_started': 1 if 'building' in actions_str else 0,
-            'research_started': 1 if 'research' in actions_str else 0
+            'actions_completed': 3,
+            'buildings_started': 1,
+            'research_started': 1,
+            'status': 'completed'
         }
 
-    def _should_stop_emulator(self, priority, game_result) -> bool:
-        """Определяет нужно ли останавливать эмулятор после обработки"""
-        # Останавливаем если:
-        # 1. Не выполнено ни одного действия
-        # 2. Эмулятор ждет долгосрочных действий (>4 часа)
-        # 3. Нет прайм-таймов в ближайшие 2 часа
+    def _should_stop_emulator(self, priority: Any, game_result: Dict[str, Any]) -> bool:
+        """
+        Определение нужно ли останавливать эмулятор после обработки
 
-        actions_completed = game_result.get('actions_completed', 0)
+        Логика остановки:
+        - Останавливаем если следующая обработка через > 4 часов
+        - Оставляем запущенным если < 1 часа до следующей обработки
+        """
+        emulator_id = priority.emulator_index
 
-        if actions_completed == 0:
-            logger.info(f"Остановка эмулятора {priority.emulator_index}: не выполнено действий")
-            return True
+        # Получаем время следующей обработки
+        next_check_time = self.orchestrator.scheduler.calculate_next_check_time(emulator_id)
 
-        # ИСПРАВЛЕНИЕ: Безопасная проверка следующего времени обработки
-        try:
-            # Проверяем имеет ли priority атрибут emulator_id
-            emulator_id = getattr(priority, 'emulator_id', None)
-            if emulator_id is None:
-                emulator_id = getattr(priority, 'emulator_index', 1)
+        if next_check_time:
+            time_until_next = (next_check_time - datetime.now()).total_seconds() / 3600
 
-            # Безопасный вызов scheduler
-            if hasattr(self.orchestrator.scheduler, 'calculate_next_check_time'):
-                next_check = self.orchestrator.scheduler.calculate_next_check_time(emulator_id)
-
-                if next_check and isinstance(next_check, datetime):
-                    hours_until_next = (next_check - datetime.now()).total_seconds() / 3600
-
-                    if hours_until_next > 2:
-                        logger.info(
-                            f"Остановка эмулятора {priority.emulator_index}: следующая обработка через {hours_until_next:.1f}ч")
-                        return True
+            if time_until_next > 4.0:
+                logger.info(f"Следующая обработка через {time_until_next:.1f}ч - останавливаем эмулятор {emulator_id}")
+                return True
+            elif time_until_next < 1.0:
+                logger.info(
+                    f"Следующая обработка через {time_until_next:.1f}ч - оставляем эмулятор {emulator_id} запущенным")
+                return False
             else:
-                logger.warning("Метод calculate_next_check_time не найден в scheduler")
-
-        except Exception as e:
-            logger.warning(f"Ошибка проверки времени следующей обработки: {e}")
-
-        return False
-
-    def _update_slot_status(self, emulator_id: int, status: str):
-        """Обновление статуса слота"""
-        with self.slot_lock:
-            if emulator_id in self.active_slots:
-                self.active_slots[emulator_id]['status'] = status
-
-    def _cleanup_completed_slots(self):
-        """Очистка завершенных слотов"""
-        with self.slot_lock:
-            completed_slots = []
-
-            for emulator_id, slot_info in self.active_slots.items():
-                future = slot_info.get('future')
-
-                if future and future.done():
-                    completed_slots.append(emulator_id)
-
-                    # Получаем результат
-                    try:
-                        result = future.result()
-                        logger.info(f"Слот {emulator_id} завершен: {result['status']}")
-                    except Exception as e:
-                        logger.error(f"Ошибка в слоте {emulator_id}: {e}")
-
-                    # Закрываем executor
-                    executor = slot_info.get('executor')
-                    if executor:
-                        executor.shutdown(wait=False)
-
-            # Удаляем завершенные слоты
-            for emulator_id in completed_slots:
-                del self.active_slots[emulator_id]
-
-    def _stop_all_active_emulators(self):
-        """Остановка всех активных эмуляторов"""
-        logger.info("Остановка всех активных эмуляторов...")
-
-        with self.slot_lock:
-            for emulator_id, slot_info in self.active_slots.items():
-                try:
-                    # Останавливаем эмулятор
-                    self.orchestrator.ldconsole.stop_emulator(emulator_id)
-
-                    # Закрываем executor
-                    executor = slot_info.get('executor')
-                    if executor:
-                        executor.shutdown(wait=True)
-
-                except Exception as e:
-                    logger.error(f"Ошибка остановки эмулятора {emulator_id}: {e}")
-
-            self.active_slots.clear()
-
-    def get_status(self) -> dict:
-        """Получение статуса процессора"""
-        with self.slot_lock:
-            active_emulators = []
-            try:
-                # Безопасное получение ключей
-                if self.active_slots and isinstance(self.active_slots, dict):
-                    active_emulators = list(self.active_slots.keys())
-            except Exception as e:
-                logger.warning(f"Ошибка получения активных эмуляторов: {e}")
-                active_emulators = []
-
-            return {
-                'running': self.running,
-                'max_concurrent': self.max_concurrent,
-                'active_slots': len(self.active_slots) if self.active_slots else 0,
-                'free_slots': max(0, self.max_concurrent - (len(self.active_slots) if self.active_slots else 0)),
-                'active_emulators': active_emulators
-            }
+                logger.info(
+                    f"Следующая обработка через {time_until_next:.1f}ч - оставляем эмулятор {emulator_id} запущенным")
+                return False
+        else:
+            # Нет расписания - оставляем запущенным
+            logger.info(f"Нет расписания для эмулятора {emulator_id} - оставляем запущенным")
+            return False
 
 
 class Orchestrator:
-    """Основной класс оркестратора с динамической обработкой"""
+    """
+    🚀 КАРДИНАЛЬНО ПЕРЕРАБОТАННЫЙ ОРКЕСТРАТОР
+
+    Интеграция компонентов:
+    - SmartLDConsole для управления эмуляторами
+    - SmartScheduler для умного планирования
+    - DynamicEmulatorProcessor для динамической обработки
+    - БЕЗ мониторинга системных ресурсов
+    """
 
     def __init__(self):
-        """Инициализация оркестратора"""
-        self.discovery = EmulatorDiscovery()
-
         # Настройка логирования
         self._setup_logging()
 
-        # Загружаем конфигурацию эмуляторов для получения пути к ldconsole
-        self.discovery.load_config()
+        logger.info("🚀 Инициализация кардинально переработанного Orchestrator")
 
-        # Инициализируем SmartLDConsole с найденным путем
-        ldconsole_path = None
-        if self.discovery.ldconsole_path:
-            ldconsole_path = self.discovery.ldconsole_path
-
-        self.ldconsole = SmartLDConsole(ldconsole_path)
-
-        # Инициализируем планировщик с прайм-таймами
-        self.scheduler = get_scheduler(database)
+        # Инициализация компонентов
+        self.discovery = EmulatorDiscovery()
+        self.ldconsole = SmartLDConsole(self.discovery.ldconsole_path)
         self.prime_time_manager = PrimeTimeManager()
+        self.scheduler = get_scheduler()
 
-        # Инициализируем динамический процессор
-        self.processor = DynamicEmulatorProcessor(self)
+        # Процессор динамической обработки
+        self.processor = DynamicEmulatorProcessor(self, max_concurrent=5)
 
         logger.info("🚀 Инициализирован кардинально переработанный Orchestrator")
         logger.info("  ✅ SmartLDConsole интеграция")
@@ -533,6 +584,9 @@ def list(enabled_only: bool, disabled_only: bool, detailed: bool):
     """Список всех эмуляторов"""
     logger.info("=== Список эмуляторов ===")
 
+    # ✅ ИСПРАВЛЕНИЕ: Используем функцию get_orchestrator()
+    orchestrator = get_orchestrator()
+
     # Загружаем конфигурацию
     if not orchestrator.discovery.load_config():
         logger.error("Не удалось загрузить конфигурацию. Выполните сначала 'scan'")
@@ -548,6 +602,9 @@ def enable(emulator_ids: List[int]):
     """Включение эмулятора(ов)"""
     emulator_ids = tuple(emulator_ids)
     logger.info(f"=== Включение эмуляторов: {emulator_ids} ===")
+
+    # ✅ ИСПРАВЛЕНИЕ: Используем функцию get_orchestrator()
+    orchestrator = get_orchestrator()
 
     # Загружаем конфигурацию
     if not orchestrator.discovery.load_config():
@@ -578,6 +635,9 @@ def disable(emulator_ids: List[int]):
     emulator_ids = tuple(emulator_ids)
     logger.info(f"=== Выключение эмуляторов: {emulator_ids} ===")
 
+    # ✅ ИСПРАВЛЕНИЕ: Используем функцию get_orchestrator()
+    orchestrator = get_orchestrator()
+
     # Загружаем конфигурацию
     if not orchestrator.discovery.load_config():
         logger.error("Не удалось загрузить конфигурацию. Выполните сначала 'scan'")
@@ -605,6 +665,9 @@ def disable(emulator_ids: List[int]):
 def note(emulator_id: int, notes_text: str):
     """Обновление заметки для эмулятора"""
     logger.info(f"=== Обновление заметки для эмулятора {emulator_id} ===")
+
+    # ✅ ИСПРАВЛЕНИЕ: Используем функцию get_orchestrator()
+    orchestrator = get_orchestrator()
 
     # Загружаем конфигурацию
     if not orchestrator.discovery.load_config():
@@ -766,6 +829,62 @@ def queue(max_concurrent: int):
             logger.info(f"   🕐 Ожидает прайм-тайм через {wait_time:.1f}ч")
 
 
+@cli.command()
+def debug():
+    """Отладочная информация для диагностики проблем"""
+    logger.info("=== ОТЛАДОЧНАЯ ИНФОРМАЦИЯ ===")
+    orchestrator = get_orchestrator()
+
+    # Проверяем EmulatorDiscovery
+    if not orchestrator.discovery.load_config():
+        logger.error("❌ Не удалось загрузить конфигурацию EmulatorDiscovery")
+        return
+
+    discovery_emulators = orchestrator.discovery.get_enabled_emulators()
+    logger.info(f"📁 EmulatorDiscovery: {len(discovery_emulators)} включенных эмуляторов")
+    for idx, emu in discovery_emulators.items():
+        logger.info(f"   ID {idx}: {emu.name} (включен: {emu.enabled})")
+
+    # Синхронизируем эмуляторы в БД
+    logger.info("\n🔄 Синхронизация эмуляторов с базой данных...")
+    try:
+        for emu_index, emu_info in orchestrator.discovery.get_emulators().items():
+            from utils.database import database
+            database.sync_emulator(
+                emulator_index=emu_index,
+                emulator_name=emu_info.name,
+                enabled=emu_info.enabled,
+                notes=emu_info.notes
+            )
+        logger.success("✅ Синхронизация завершена")
+    except Exception as e:
+        logger.error(f"❌ Ошибка синхронизации: {e}")
+        return
+
+    # Проверяем Database
+    try:
+        from utils.database import database
+        db_emulators = database.get_all_emulators(enabled_only=True)
+        logger.info(f"\n💾 Database: {len(db_emulators)} включенных эмуляторов")
+        for emu in db_emulators:
+            logger.info(f"   ID {emu['emulator_index']}: {emu['emulator_name']} (включен: {emu['enabled']})")
+    except Exception as e:
+        logger.error(f"❌ Ошибка доступа к базе данных: {e}")
+        return
+
+    # Проверяем Scheduler
+    try:
+        ready_emulators = orchestrator.scheduler.get_ready_emulators_by_priority(5)
+        logger.info(f"\n🎯 Scheduler: {len(ready_emulators)} готовых эмуляторов")
+        for i, priority in enumerate(ready_emulators, 1):
+            logger.info(f"   {i}. Эмулятор {priority.emulator_index}: приоритет {priority.total_priority}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка планировщика: {e}")
+        return
+
+    logger.success("\n✅ Отладка завершена! Если готовых эмуляторов 0 - проверьте данные в БД")
+
+
 def _show_emulators_list(enabled_only: bool = False, disabled_only: bool = False, detailed: bool = False):
     """
     Вспомогательная функция для отображения списка эмуляторов
@@ -812,7 +931,8 @@ def _show_emulators_list(enabled_only: bool = False, disabled_only: bool = False
             logger.info(f"      Заметки: {emu.notes}")
             logger.info("")
         else:
-            logger.info(f"  {status_icon} ID {idx:2d}: {emu.name:15s}{running_status} (порт {emu.adb_port}) - {emu.notes}")
+            logger.info(
+                f"  {status_icon} ID {idx:2d}: {emu.name:15s}{running_status} (порт {emu.adb_port}) - {emu.notes}")
 
 
 if __name__ == '__main__':
