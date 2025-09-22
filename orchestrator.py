@@ -317,10 +317,11 @@ class DynamicEmulatorProcessor:
 
             if not self.orchestrator.ldconsole.is_running(emulator_id):
                 logger.info(f"Запуск эмулятора {emulator_id}...")
-                if not self.orchestrator.ldconsole.start_emulator(emulator_id):
+                # ИСПРАВЛЕНИЕ: Запускаем БЕЗ автоматического ожидания готовности
+                if not self.orchestrator.ldconsole.start_emulator(emulator_id, wait_ready=False):
                     raise Exception("Не удалось запустить эмулятор")
 
-                # ИСПРАВЛЕНИЕ: Ожидание готовности с увеличенным таймаутом
+                # ИСПРАВЛЕНИЕ: Ожидание готовности с увеличенным таймаутом и задержкой
                 logger.info(f"Ожидание готовности ADB для эмулятора {emulator_id}...")
                 if not self._wait_emulator_ready_fixed(emulator_id, timeout=120):
                     raise Exception("Эмулятор не готов к работе")
