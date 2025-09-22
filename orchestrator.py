@@ -97,15 +97,27 @@ class DynamicEmulatorProcessor:
                     # 3. Получаем готовых эмуляторов по приоритету
                     ready_emulators = self.orchestrator.scheduler.get_ready_emulators_by_priority(free_slots)
 
+                    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Безопасная обработка ready_emulators
                     if ready_emulators:
-                        logger.info(f"Свободных слотов: {free_slots}, готовых эмуляторов: {len(ready_emulators)}")
+                        try:
+                            # Безопасная проверка - пробуем получить длину
+                            emulators_count = len(ready_emulators)
+                            logger.info(f"Свободных слотов: {free_slots}, готовых эмуляторов: {emulators_count}")
 
-                        # 4. Запускаем обработку готовых эмуляторов
-                        for priority in ready_emulators:
-                            if len(self.active_slots) >= self.max_concurrent:
-                                break  # Слоты заполнены
+                            # 4. Запускаем обработку готовых эмуляторов
+                            try:
+                                for priority in ready_emulators:
+                                    if len(self.active_slots) >= self.max_concurrent:
+                                        break  # Слоты заполнены
 
-                            self._start_emulator_processing(priority)
+                                    self._start_emulator_processing(priority)
+                            except Exception as e:
+                                logger.error(f"Ошибка при итерации по ready_emulators: {e}")
+
+                        except (TypeError, AttributeError) as e:
+                            logger.error(f"Ошибка обработки ready_emulators: {type(ready_emulators)}, {e}")
+                    else:
+                        logger.info(f"Свободных слотов: {free_slots}, готовых эмуляторов: 0")
 
                 # 5. Показываем статус активных слотов
                 if self.active_slots:
@@ -243,13 +255,29 @@ class DynamicEmulatorProcessor:
         # ЗАГЛУШКА для игровых действий
         logger.info(f"[ЗАГЛУШКА] ПАРАЛЛЕЛЬНАЯ обработка игровых действий для эмулятора {emulator_id}")
 
-        # Безопасная обработка recommended_actions
-        recommended_actions = getattr(priority, 'recommended_actions', [])
-        if not isinstance(recommended_actions, list):
-            if isinstance(recommended_actions, tuple):
-                recommended_actions = list(recommended_actions)
-            else:
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Полностью безопасная обработка recommended_actions
+        recommended_actions = []
+        try:
+            # Получаем атрибут без isinstance проверки
+            raw_actions = getattr(priority, 'recommended_actions', None)
+
+            if raw_actions is None:
                 recommended_actions = []
+            else:
+                # Пробуем преобразовать к списку разными способами
+                try:
+                    # Пробуем итерировать (работает для списков, кортежей)
+                    recommended_actions = list(raw_actions)
+                except (TypeError, ValueError):
+                    # Если не итерируется, пробуем как строку
+                    try:
+                        recommended_actions = [str(raw_actions)]
+                    except:
+                        recommended_actions = []
+
+        except Exception as e:
+            logger.warning(f"Ошибка обработки recommended_actions: {e}")
+            recommended_actions = []
 
         logger.info(f"  Рекомендуемые действия: {recommended_actions}")
         logger.info(f"  Ожидание прайм-тайма: {getattr(priority, 'waiting_for_prime_time', False)}")
@@ -258,10 +286,16 @@ class DynamicEmulatorProcessor:
         time.sleep(2)  # Уменьшаем время для тестов
 
         # Безопасная обработка действий
-        actions_str = ' '.join(str(action) for action in recommended_actions) if recommended_actions else ''
+        actions_str = ''
+        if recommended_actions:
+            try:
+                actions_str = ' '.join(str(action) for action in recommended_actions)
+            except Exception as e:
+                logger.warning(f"Ошибка формирования строки действий: {e}")
+                actions_str = ''
 
         return {
-            'actions_completed': len(recommended_actions),
+            'actions_completed': len(recommended_actions) if recommended_actions else 0,
             'buildings_started': 1 if 'building' in actions_str else 0,
             'research_started': 1 if 'research' in actions_str else 0
         }
@@ -279,13 +313,29 @@ class DynamicEmulatorProcessor:
             logger.info(f"Остановка эмулятора {priority.emulator_index}: не выполнено действий")
             return True
 
-        # Проверяем следующее время обработки
-        next_check = self.orchestrator.scheduler.calculate_next_check_time(priority.emulator_id)
-        hours_until_next = (next_check - datetime.now()).total_seconds() / 3600
+        # ИСПРАВЛЕНИЕ: Безопасная проверка следующего времени обработки
+        try:
+            # Проверяем имеет ли priority атрибут emulator_id
+            emulator_id = getattr(priority, 'emulator_id', None)
+            if emulator_id is None:
+                emulator_id = getattr(priority, 'emulator_index', 1)
 
-        if hours_until_next > 2:
-            logger.info(f"Остановка эмулятора {priority.emulator_index}: следующая обработка через {hours_until_next:.1f}ч")
-            return True
+            # Безопасный вызов scheduler
+            if hasattr(self.orchestrator.scheduler, 'calculate_next_check_time'):
+                next_check = self.orchestrator.scheduler.calculate_next_check_time(emulator_id)
+
+                if next_check and isinstance(next_check, datetime):
+                    hours_until_next = (next_check - datetime.now()).total_seconds() / 3600
+
+                    if hours_until_next > 2:
+                        logger.info(
+                            f"Остановка эмулятора {priority.emulator_index}: следующая обработка через {hours_until_next:.1f}ч")
+                        return True
+            else:
+                logger.warning("Метод calculate_next_check_time не найден в scheduler")
+
+        except Exception as e:
+            logger.warning(f"Ошибка проверки времени следующей обработки: {e}")
 
         return False
 
@@ -347,7 +397,9 @@ class DynamicEmulatorProcessor:
         with self.slot_lock:
             active_emulators = []
             try:
-                active_emulators = list(self.active_slots.keys())
+                # Безопасное получение ключей
+                if self.active_slots and isinstance(self.active_slots, dict):
+                    active_emulators = list(self.active_slots.keys())
             except Exception as e:
                 logger.warning(f"Ошибка получения активных эмуляторов: {e}")
                 active_emulators = []
@@ -355,8 +407,8 @@ class DynamicEmulatorProcessor:
             return {
                 'running': self.running,
                 'max_concurrent': self.max_concurrent,
-                'active_slots': len(self.active_slots),
-                'free_slots': max(0, self.max_concurrent - len(self.active_slots)),
+                'active_slots': len(self.active_slots) if self.active_slots else 0,
+                'free_slots': max(0, self.max_concurrent - (len(self.active_slots) if self.active_slots else 0)),
                 'active_emulators': active_emulators
             }
 
