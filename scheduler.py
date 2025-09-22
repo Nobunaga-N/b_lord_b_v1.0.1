@@ -1,10 +1,11 @@
 """
-SmartScheduler для Beast Lord Bot - ПРОМПТ 18 ЗАВЕРШЕН
+SmartScheduler для Beast Lord Bot - ПРОМПТ 18 ЗАВЕРШЕН + ИСПРАВЛЕНИЕ
 Умный планировщик с ПАРАЛЛЕЛЬНЫМ планированием зданий И исследований
 
 КРИТИЧНО: Методы для ПАРАЛЛЕЛЬНОГО планирования:
 - calculate_priority() с множественными факторами (включая свободные слоты)
 - get_ready_emulators_by_priority() - готовые эмуляторы по приоритету
+- get_emulator_priority() - приоритет конкретного эмулятора (ДОБАВЛЕНО)
 - calculate_next_check_time() с умной логикой для завершения зданий И исследований
 - Интеграция с прайм-таймами и ПАРАЛЛЕЛЬНЫМ прогрессом
 
@@ -39,6 +40,7 @@ class EmulatorPriority:
     waiting_for_prime_time: bool = False
     next_prime_time_window: Optional[datetime] = None
     recommended_actions: List[str] = field(default_factory=list)
+    prime_time_wait_hours: float = 0.0
 
     def __str__(self):
         return (f"EmulatorPriority(index={self.emulator_index}, "
@@ -73,7 +75,7 @@ class SmartScheduler:
             'lord_upgrade_ready': 1000,  # Готовность к повышению лорда = ВЫСШИЙ приоритет
             'completed_buildings': 500,  # Завершенные строительства = высокий приоритет
             'completed_research': 500,   # Завершенные исследования = высокий приоритет
-            'free_builder_slot': 200,    # Свободный слот строительства = средний приоритет
+            'free_builder_slot': 600,    # Свободный слот строительства = средний приоритет
             'free_research_slot': 200,   # Свободный слот исследований = средний приоритет
             'prime_time_bonus': 100,     # Бонус за прайм-тайм = бонус приоритета
             'per_hour_waiting': 1,       # За каждый час ожидания = базовый приоритет
@@ -123,54 +125,41 @@ class SmartScheduler:
             priority.recommended_actions.append('upgrade_lord')
             logger.debug(f"   ⭐ Готов к повышению лорда (+{bonus})")
 
-        # 2. ЗАВЕРШЕННЫЕ СТРОИТЕЛЬСТВА И ИССЛЕДОВАНИЯ = высокий приоритет (500 баллов)
-        completed_buildings = self.database.get_completed_buildings(emulator_data['id'])
-        completed_research = self.database.get_completed_research(emulator_data['id'])
-
-        if completed_buildings:
-            count = len(completed_buildings)
-            bonus = self.priority_weights['completed_buildings'] * count
+        # 2. ЗАВЕРШЕННЫЕ СТРОИТЕЛЬСТВА/ИССЛЕДОВАНИЯ = высокий приоритет (500 баллов)
+        completed_buildings = emulator_data.get('completed_buildings', 0)
+        if completed_buildings > 0:
+            bonus = self.priority_weights['completed_buildings'] * completed_buildings
             priority.priority_factors['completed_buildings'] = bonus
-            priority.recommended_actions.extend(
-                [f"complete_building_{b['building_name']}" for b in completed_buildings])
-            logger.debug(f"   🏗️ {count} завершенных зданий (+{bonus})")
+            priority.recommended_actions.append('collect_buildings')
+            logger.debug(f"   🏗️ Завершенных зданий: {completed_buildings} (+{bonus})")
 
-        if completed_research:
-            count = len(completed_research)
-            bonus = self.priority_weights['completed_research'] * count
+        completed_research = emulator_data.get('completed_research', 0)
+        if completed_research > 0:
+            bonus = self.priority_weights['completed_research'] * completed_research
             priority.priority_factors['completed_research'] = bonus
-            priority.recommended_actions.extend(
-                [f"complete_research_{r['research_name']}" for r in completed_research])
-            logger.debug(f"   🔬 {count} завершенных исследований (+{bonus})")
+            priority.recommended_actions.append('collect_research')
+            logger.debug(f"   🔬 Завершенных исследований: {completed_research} (+{bonus})")
 
         # 3. СВОБОДНЫЕ СЛОТЫ СТРОИТЕЛЬСТВА И ИССЛЕДОВАНИЙ = средний приоритет (200 баллов)
-        # КРИТИЧНО: ПАРАЛЛЕЛЬНАЯ проверка слотов
-        free_building_slots = self._get_free_building_slots(emulator_data)
-        free_research_slots = self._get_free_research_slots(emulator_data)
+        if emulator_data.get('has_free_building_slot', True):  # По умолчанию считаем что есть слот
+            bonus = self.priority_weights['free_builder_slot']
+            priority.priority_factors['free_builder_slot'] = bonus
+            priority.recommended_actions.append('start_building')
+            logger.debug(f"   🏗️ Свободный слот строительства (+{bonus})")
 
-        if free_building_slots > 0:
-            # Проверяем есть ли что строить
-            available_buildings = self.database.get_buildings_ready_for_upgrade(emulator_data['id'])
-            if available_buildings:
-                bonus = self.priority_weights['free_builder_slot'] * free_building_slots
-                priority.priority_factors['free_builder_slot'] = bonus
-                priority.recommended_actions.append('start_building')
-                logger.debug(f"   🔨 {free_building_slots} свободных слотов строительства (+{bonus})")
-
-        if free_research_slots > 0:
-            # Проверяем есть ли что исследовать
-            available_research = self.database.get_available_research_for_upgrade(emulator_data['id'])
-            if available_research:
-                bonus = self.priority_weights['free_research_slot'] * free_research_slots
-                priority.priority_factors['free_research_slot'] = bonus
-                priority.recommended_actions.append('start_research')
-                logger.debug(f"   📚 {free_research_slots} свободных слотов исследований (+{bonus})")
+        if emulator_data.get('has_free_research_slot', True):  # По умолчанию считаем что есть слот
+            bonus = self.priority_weights['free_research_slot']
+            priority.priority_factors['free_research_slot'] = bonus
+            priority.recommended_actions.append('start_research')
+            logger.debug(f"   🔬 Свободный слот исследований (+{bonus})")
 
         # 4. ПРАЙМ-ТАЙМ БОНУС = бонус приоритета (+100 баллов)
-        prime_time_bonus = self._calculate_prime_time_bonus(priority.recommended_actions)
-        if prime_time_bonus > 0:
-            priority.priority_factors['prime_time_bonus'] = prime_time_bonus
-            logger.debug(f"   🎯 Прайм-тайм активен (+{prime_time_bonus})")
+        prime_actions = self.prime_time_manager.get_current_prime_actions()
+        if prime_actions:
+            bonus = self.priority_weights['prime_time_bonus']
+            priority.priority_factors['prime_time_bonus'] = bonus
+            priority.recommended_actions.extend(prime_actions)
+            logger.debug(f"   ⭐ Прайм-тайм активен: {prime_actions} (+{bonus})")
 
         # 5. ВРЕМЯ С ПОСЛЕДНЕЙ ОБРАБОТКИ = базовый приоритет (+1 за час)
         waiting_bonus = self._calculate_waiting_bonus(emulator_data)
@@ -190,6 +179,11 @@ class SmartScheduler:
             should_wait, next_prime_time = prime_wait_result
             priority.waiting_for_prime_time = should_wait
             priority.next_prime_time_window = next_prime_time
+
+            # Рассчитываем время ожидания в часах
+            if next_prime_time:
+                wait_seconds = (next_prime_time - datetime.now()).total_seconds()
+                priority.prime_time_wait_hours = max(0, wait_seconds / 3600)
 
         logger.debug(f"   💯 Итого приоритет: {priority.total_priority}")
         return priority
@@ -245,6 +239,59 @@ class SmartScheduler:
 
         return result
 
+    def get_emulator_priority(self, emulator_id: int) -> Optional[EmulatorPriority]:
+        """
+        ДОБАВЛЕНО: Получение приоритета конкретного эмулятора по ID
+
+        Используется для принудительной обработки и отладки.
+
+        Args:
+            emulator_id: ID эмулятора
+
+        Returns:
+            Объект EmulatorPriority или None если эмулятор не найден
+        """
+        try:
+            # Получаем данные эмулятора по индексу
+            emulator_data = self.database.get_emulator_by_index(emulator_id)
+
+            if not emulator_data:
+                logger.warning(f"Эмулятор {emulator_id} не найден в базе данных")
+                return None
+
+            if not emulator_data.get('enabled', False):
+                logger.warning(f"Эмулятор {emulator_id} отключен")
+                return None
+
+            # Рассчитываем приоритет
+            priority = self.calculate_emulator_priority(emulator_data)
+
+            logger.debug(f"✅ Приоритет эмулятора {emulator_id}: {priority.total_priority}")
+            return priority
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения приоритета эмулятора {emulator_id}: {e}")
+            return None
+
+    def calculate_next_check_time(self, emulator_id: int) -> Optional[datetime]:
+        """
+        Публичный метод для расчета времени следующей проверки эмулятора
+
+        Args:
+            emulator_id: ID эмулятора
+
+        Returns:
+            Время следующей проверки или None
+        """
+        try:
+            emulator_data = self.database.get_emulator_by_index(emulator_id)
+            if emulator_data:
+                return self._calculate_next_check_time(emulator_data)
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка расчета времени проверки для эмулятора {emulator_id}: {e}")
+            return None
+
     def _calculate_next_check_time(self, emulator_data: Dict[str, Any]) -> datetime:
         """
         КРИТИЧНО: Умный расчет времени следующей проверки эмулятора
@@ -262,68 +309,42 @@ class SmartScheduler:
         # 1. Получаем минимальный интервал для уровня лорда
         min_interval = self._get_min_interval_for_lord_level(lord_level)
 
-        # 2. Получаем активные строительства И исследования ПАРАЛЛЕЛЬНО
-        active_buildings = self.database.get_active_buildings(emulator_data['id'])
-        active_research = self.database.get_active_research(emulator_data['id'])
+        # 2. Проверяем есть ли завершающиеся здания/исследования
+        completion_times = []
 
-        all_active = []
+        # Завершение зданий
+        building_end_time = emulator_data.get('building_end_time')
+        if building_end_time:
+            try:
+                end_time = datetime.fromisoformat(building_end_time)
+                if end_time > current_time:
+                    completion_times.append(end_time)
+            except (ValueError, TypeError):
+                pass
 
-        # Парсим времена завершения зданий
-        for building in active_buildings:
-            if building.get('estimated_completion'):
-                try:
-                    completion_time = datetime.fromisoformat(building['estimated_completion'])
-                    all_active.append(completion_time)
-                except (ValueError, TypeError):
-                    continue
+        # Завершение исследований
+        research_end_time = emulator_data.get('research_end_time')
+        if research_end_time:
+            try:
+                end_time = datetime.fromisoformat(research_end_time)
+                if end_time > current_time:
+                    completion_times.append(end_time)
+            except (ValueError, TypeError):
+                pass
 
-        # Парсим времена завершения исследований
-        for research in active_research:
-            if research.get('estimated_completion'):
-                try:
-                    completion_time = datetime.fromisoformat(research['estimated_completion'])
-                    all_active.append(completion_time)
-                except (ValueError, TypeError):
-                    continue
-
-        if all_active:
-            # Находим ближайшее завершение (здание ИЛИ исследование)
-            next_completion = min(all_active)
-            buffer_time = timedelta(seconds=self.prime_time_settings['completion_buffer'])
-            optimal_time = next_completion + buffer_time
-
-            # Проверяем минимальный интервал
-            last_processed = emulator_data.get('last_processed')
-            if last_processed:
-                try:
-                    last_time = datetime.fromisoformat(last_processed)
-                    earliest_allowed = last_time + min_interval
-
-                    # Берем максимум из оптимального времени и минимально разрешенного
-                    next_check = max(optimal_time, earliest_allowed)
-                except (ValueError, TypeError):
-                    next_check = optimal_time
-            else:
-                next_check = optimal_time
-
-            logger.debug(
-                f"⏰ Эмулятор {emulator_data['emulator_index']}: следующая проверка к завершению {next_check.strftime('%H:%M')}")
-            return next_check
+        # 3. Определяем время следующей проверки
+        if completion_times:
+            # Используем ближайшее завершение + буфер
+            next_completion = min(completion_times)
+            buffer = timedelta(seconds=self.prime_time_settings['completion_buffer'])
+            next_check = next_completion + buffer
+            logger.debug(f"   📅 К завершению {next_completion.strftime('%H:%M')}: проверка в {next_check.strftime('%H:%M')}")
         else:
-            # Нет активных действий - зайти как можно скорее (но не раньше мин интервала)
-            last_processed = emulator_data.get('last_processed')
-            if last_processed:
-                try:
-                    last_time = datetime.fromisoformat(last_processed)
-                    next_check = last_time + min_interval
-                except (ValueError, TypeError):
-                    next_check = current_time + min_interval
-            else:
-                next_check = current_time + min_interval
+            # Используем минимальный интервал
+            next_check = current_time + min_interval
+            logger.debug(f"   ⏰ Минимальный интервал {min_interval}: проверка в {next_check.strftime('%H:%M')}")
 
-            logger.debug(
-                f"⚡ Эмулятор {emulator_data['emulator_index']}: нет активных действий, следующая проверка {next_check.strftime('%H:%M')}")
-            return next_check
+        return next_check
 
     def _get_min_interval_for_lord_level(self, lord_level: int) -> timedelta:
         """Получение минимального интервала для уровня лорда"""
@@ -336,114 +357,46 @@ class SmartScheduler:
         else:
             return self.min_check_intervals['lord_19_plus']
 
-    def _get_free_building_slots(self, emulator_data: Dict[str, Any]) -> int:
-        """
-        КРИТИЧНО: Получение количества свободных слотов строительства
-        ПАРАЛЛЕЛЬНО с исследованиями
-        """
-        lord_level = emulator_data['lord_level']
-
-        # Количество слотов строительства зависит от уровня лорда (из ТЗ)
-        if lord_level <= 15:
-            max_slots = 3  # 3 строителя для лордов 10-15
-        else:
-            max_slots = 4  # 4 строителя для лордов 16+
-
-        # Получаем активные строительства
-        active_buildings = self.database.get_active_buildings(emulator_data['id'])
-        used_slots = len(active_buildings)
-
-        return max(0, max_slots - used_slots)
-
-    def _get_free_research_slots(self, emulator_data: Dict[str, Any]) -> int:
-        """
-        КРИТИЧНО: Получение количества свободных слотов исследований
-        ПАРАЛЛЕЛЬНО с строительством (отдельная очередь)
-        """
-        # Исследования: отдельная очередь (обычно 1 слот)
-        max_slots = 1
-
-        # Получаем активные исследования
-        active_research = self.database.get_active_research(emulator_data['id'])
-        used_slots = len(active_research)
-
-        return max(0, max_slots - used_slots)
-
-    def _calculate_prime_time_bonus(self, recommended_actions: List[str]) -> int:
-        """
-        Расчет бонуса приоритета за прайм-тайм
-
-        Args:
-            recommended_actions: Список рекомендуемых действий
-
-        Returns:
-            Бонус приоритета (+100 за прайм-тайм)
-        """
-        if not recommended_actions:
-            return 0
-
-        # Определяем типы действий для прайм-тайма
-        action_types = []
-        for action in recommended_actions:
-            if 'building' in action:
-                action_types.append('building_power')
-            elif 'research' in action or 'evolution' in action:
-                action_types.append('evolution_bonus')
-            elif 'lord' in action:
-                action_types.append('building_power')  # Повышение лорда связано с зданиями
-
-        if not action_types:
-            action_types = ['building_power']  # По умолчанию
-
-        # Получаем максимальный бонус для любого из типов действий
-        max_bonus = 0
-        for action_type in action_types:
-            bonus = self.prime_time_manager.get_priority_bonus_for_action(action_type)
-            max_bonus = max(max_bonus, bonus)
-
-        return max_bonus
-
     def _calculate_waiting_bonus(self, emulator_data: Dict[str, Any]) -> int:
-        """Расчет бонуса за время ожидания (+1 за час)"""
+        """Расчет бонуса за время ожидания"""
         last_processed = emulator_data.get('last_processed')
         if not last_processed:
-            return 0
+            return 24  # Если никогда не обрабатывался - максимальный бонус
 
         try:
             last_time = datetime.fromisoformat(last_processed)
-            hours_waiting = (datetime.now() - last_time).total_seconds() / 3600
-            bonus = int(hours_waiting * self.priority_weights['per_hour_waiting'])
-            return max(0, bonus)
+            hours_waited = (datetime.now() - last_time).total_seconds() / 3600
+            return int(hours_waited * self.priority_weights['per_hour_waiting'])
         except (ValueError, TypeError):
             return 0
 
-    def _should_wait_for_prime_time(self, recommended_actions: List[str]) -> Optional[Tuple[bool, Optional[datetime]]]:
+    def _should_wait_for_prime_time(self, recommended_actions: List[str]) -> Optional[Tuple[bool, datetime]]:
         """
-        Определение стоит ли ждать прайм-тайм
+        Проверка нужно ли ждать прайм-тайм для рекомендуемых действий
 
         Args:
             recommended_actions: Список рекомендуемых действий
 
         Returns:
-            Кортеж (стоит_ждать, время_прайм_тайма) или None
+            Кортеж (нужно_ждать, время_прайм_тайма) или None
         """
         if not recommended_actions:
             return None
 
-        # Определяем типы действий для прайм-тайма
+        # Получаем типы действий для проверки прайм-тайма
         action_types = []
         for action in recommended_actions:
             if 'building' in action:
                 action_types.append('building_power')
-            elif 'research' in action or 'evolution' in action:
+            elif 'research' in action:
+                action_types.append('research_bonus')
+            elif 'upgrade_lord' in action:
                 action_types.append('evolution_bonus')
-            elif 'training' in action or 'soldier' in action:
-                action_types.append('training_bonus')
 
         if not action_types:
             return None
 
-        # Проверяем стоит ли ждать прайм-тайм
+        # Проверяем через PrimeTimeManager
         should_wait, next_time = self.prime_time_manager.should_wait_for_prime_time(
             action_types,
             self.prime_time_settings['max_wait_hours']
