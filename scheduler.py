@@ -600,7 +600,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     print("=== ТЕСТ SMARTSCHEDULER ===")
-    print("Для полного тестирования запустите: python test_smart_scheduler.py")
 
     try:
         # Создаем планировщик
