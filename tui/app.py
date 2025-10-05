@@ -136,15 +136,11 @@ class BotTUIApp:
             ) as live:
 
                 while self.running:
+                    # Флаг необходимости обновления экрана
+                    need_update = False
+
                     # Получаем ввод без блокировки
                     if self.console.is_terminal:
-                        # Обновляем отображение
-                        try:
-                            current_screen = self.screens[self.current_screen_name]
-                            live.update(current_screen.render())
-                        except Exception as e:
-                            logger.error(f"Ошибка отрисовки экрана: {e}")
-
                         # Читаем клавишу с таймаутом
                         try:
                             import msvcrt
@@ -158,6 +154,10 @@ class BotTUIApp:
                                         key = 'up'
                                     elif key == 'P':
                                         key = 'down'
+                                    elif key == 'K':
+                                        key = 'left'
+                                    elif key == 'M':
+                                        key = 'right'
                                 elif key == '\x1b':  # ESC
                                     key = 'escape'
                                 elif key == '\r':  # Enter
@@ -168,19 +168,37 @@ class BotTUIApp:
                                     key = 'backspace'
 
                                 # Обрабатываем клавишу
+                                current_screen = self.screens[self.current_screen_name]
                                 result = current_screen.handle_key(key)
+
+                                # После обработки клавиши ВСЕГДА обновляем экран
+                                need_update = True
+
+                                # Проверяем выход из приложения
                                 if result is False and key.lower() == 'q' and self.current_screen_name == 'main':
                                     self.running = False
                                     logger.info("Выход из приложения по запросу пользователя")
                                     break
+
                         except ImportError:
                             # Unix-системы - используем другой подход
                             import select
                             if select.select([sys.stdin], [], [], 0.1)[0]:
                                 key = sys.stdin.read(1)
+                                current_screen = self.screens[self.current_screen_name]
                                 current_screen.handle_key(key)
+                                need_update = True
 
-                    time.sleep(0.1)
+                    # Обновляем экран ТОЛЬКО если была обработана клавиша
+                    if need_update:
+                        try:
+                            current_screen = self.screens[self.current_screen_name]
+                            live.update(current_screen.render())
+                        except Exception as e:
+                            logger.error(f"Ошибка отрисовки экрана: {e}")
+
+                    # Небольшая задержка для снижения нагрузки на CPU
+                    time.sleep(0.05)
 
         except KeyboardInterrupt:
             logger.info("Получен сигнал прерывания (Ctrl+C)")
