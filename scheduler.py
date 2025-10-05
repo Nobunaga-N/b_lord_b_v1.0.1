@@ -539,9 +539,13 @@ def get_scheduler(database: Database = None, prime_time_manager: PrimeTimeManage
     global _scheduler_instance
 
     if _scheduler_instance is None:
+        # ИСПРАВЛЕНИЕ: Создаем экземпляр Database, а не импортируем как переменную
         if database is None:
-            from utils.database import database as default_db
-            database = default_db
+            from utils.database import Database
+            database = Database()  # Создаем экземпляр класса!
+
+        if prime_time_manager is None:
+            prime_time_manager = PrimeTimeManager()
 
         _scheduler_instance = SmartScheduler(database, prime_time_manager)
         logger.info("🎯 Создан глобальный экземпляр SmartScheduler")
