@@ -25,11 +25,12 @@ from orchestrator import get_orchestrator
 
 
 class LogBuffer:
-    """Буфер для хранения последних логов"""
+    """Буфер для хранения логов с поддержкой скроллинга"""
 
-    def __init__(self, max_lines: int = 15):
+    def __init__(self, max_lines: int = 500):
         self.max_lines = max_lines
         self.logs = deque(maxlen=max_lines)
+        self.scroll_offset = 0  # Смещение для скроллинга (0 = последние логи)
 
     def add(self, message: str, level: str = "INFO"):
         """Добавить лог в буфер"""
@@ -53,23 +54,71 @@ class LogBuffer:
             'color': color
         })
 
-    def get_logs_panel(self) -> Panel:
-        """Получить панель с логами для отображения"""
+        # Если добавлен новый лог и мы в режиме автоскролла, сбрасываем offset
+        if self.scroll_offset == 0:
+            pass  # Остаемся внизу
+
+    def scroll_up(self, lines: int = 5):
+        """Прокрутка вверх"""
+        max_offset = max(0, len(self.logs) - 10)
+        self.scroll_offset = min(self.scroll_offset + lines, max_offset)
+
+    def scroll_down(self, lines: int = 5):
+        """Прокрутка вниз"""
+        self.scroll_offset = max(0, self.scroll_offset - lines)
+
+    def scroll_to_top(self):
+        """Прокрутка в начало"""
+        self.scroll_offset = max(0, len(self.logs) - 10)
+
+    def scroll_to_bottom(self):
+        """Прокрутка в конец (автоскролл)"""
+        self.scroll_offset = 0
+
+    def get_logs_panel(self, height: int = 20) -> Panel:
+        """Получить панель с логами для отображения
+
+        Args:
+            height: Высота панели для расчета количества видимых строк
+        """
         if not self.logs:
             content = Text("Логи появятся здесь...", style="dim")
+            subtitle = ""
         else:
             content = Text()
-            for log in self.logs:
-                # Форматируем лог
+
+            # Вычисляем диапазон видимых логов
+            total_logs = len(self.logs)
+            visible_lines = max(1, height - 3)  # Минус рамка и заголовок
+
+            # Определяем какие логи показывать
+            if self.scroll_offset == 0:
+                # Автоскролл - показываем последние
+                start_idx = max(0, total_logs - visible_lines)
+                end_idx = total_logs
+            else:
+                # Ручной скролл - показываем с учетом offset
+                end_idx = total_logs - self.scroll_offset
+                start_idx = max(0, end_idx - visible_lines)
+
+            # Формируем видимые логи
+            visible_logs = list(self.logs)[start_idx:end_idx]
+            for log in visible_logs:
                 content.append(f"[{log['timestamp']}] ", style="cyan")
                 content.append(f"{log['level']:<8} ", style=log['color'])
                 content.append(f"| {log['message']}\n", style=log['color'])
 
+            # Формируем информацию о скроллинге
+            if self.scroll_offset > 0:
+                subtitle = f"↑ Прокручено вверх | PgDn/End - вниз | Показано {start_idx+1}-{end_idx} из {total_logs}"
+            else:
+                subtitle = f"Автоскролл ✓ | PgUp/Home - прокрутить вверх | Всего логов: {total_logs}"
+
         return Panel(
             content,
             title="[cyan]📋 Логи[/cyan]",
-            border_style="cyan",
-            height=10  # Фиксированная высота панели логов
+            subtitle=subtitle,
+            border_style="cyan"
         )
 
 
@@ -81,8 +130,8 @@ class BotTUIApp:
         self.console = Console()
         self.orchestrator = get_orchestrator()
 
-        # Буфер логов
-        self.log_buffer = LogBuffer(max_lines=15)
+        # Буфер логов (храним до 500 последних логов)
+        self.log_buffer = LogBuffer(max_lines=500)
 
         # Загрузка конфигурации
         self.config_path = Path("configs/tui_config.yaml")
@@ -169,13 +218,20 @@ class BotTUIApp:
         # Получаем рендер текущего экрана
         screen_layout = self.screens[self.current_screen_name].render()
 
-        # Создаем панель логов
-        logs_panel = self.log_buffer.get_logs_panel()
+        # Получаем высоту терминала для расчета высоты панели логов
+        terminal_height = self.console.height
+        # Фиксированная высота для интерфейса (примерно 25-30 строк)
+        interface_height = min(30, terminal_height - 15)
+        # Логи занимают все оставшееся пространство
+        logs_height = max(10, terminal_height - interface_height - 2)
 
-        # Компонуем: экран сверху (80%), логи снизу (20%)
+        # Создаем панель логов с динамической высотой
+        logs_panel = self.log_buffer.get_logs_panel(height=logs_height)
+
+        # Компонуем: экран сверху (фиксированная высота), логи снизу (растягиваются)
         main_layout.split_column(
-            Layout(screen_layout, ratio=4),
-            Layout(logs_panel, size=10)
+            Layout(screen_layout, size=interface_height),
+            Layout(logs_panel)  # Без size - занимает все оставшееся место
         )
 
         return main_layout
@@ -190,7 +246,16 @@ class BotTUIApp:
                 ch = msvcrt.getch()
                 if ch in (b'\x00', b'\xe0'):
                     ch2 = msvcrt.getch()
-                    arrow_map = {b'H': 'up', b'P': 'down', b'K': 'left', b'M': 'right'}
+                    arrow_map = {
+                        b'H': 'up',
+                        b'P': 'down',
+                        b'K': 'left',
+                        b'M': 'right',
+                        b'I': 'page_up',    # PageUp
+                        b'Q': 'page_down',   # PageDown
+                        b'G': 'home',        # Home
+                        b'O': 'end'          # End
+                    }
                     return arrow_map.get(ch2, None)
                 try:
                     key = ch.decode('utf-8')
@@ -221,8 +286,29 @@ class BotTUIApp:
                         ch2 = sys.stdin.read(1)
                         if ch2 == '[':
                             ch3 = sys.stdin.read(1)
-                            key_map = {'A': 'up', 'B': 'down', 'C': 'right', 'D': 'left'}
-                            return key_map.get(ch3, 'escape')
+                            # Обработка расширенных последовательностей
+                            if ch3 in '0123456789':
+                                ch4 = sys.stdin.read(1)
+                                if ch4 == '~':
+                                    # Специальные клавиши
+                                    key_map = {
+                                        '5': 'page_up',   # PageUp
+                                        '6': 'page_down', # PageDown
+                                        '1': 'home',      # Home (альтернатива)
+                                        '4': 'end'        # End (альтернатива)
+                                    }
+                                    return key_map.get(ch3, None)
+                            else:
+                                # Стрелки и другие клавиши
+                                key_map = {
+                                    'A': 'up',
+                                    'B': 'down',
+                                    'C': 'right',
+                                    'D': 'left',
+                                    'H': 'home',  # Home
+                                    'F': 'end'    # End
+                                }
+                                return key_map.get(ch3, 'escape')
                         return 'escape'
                     elif ch == '\r' or ch == '\n':
                         return 'enter'
@@ -296,7 +382,25 @@ class BotTUIApp:
                     key = self._get_key()
 
                     if key:
-                        # Обрабатываем клавишу
+                        # Обрабатываем глобальные клавиши скроллинга логов
+                        if key == 'page_up':
+                            self.log_buffer.scroll_up(5)
+                            live.update(self.render_with_logs())
+                            continue
+                        elif key == 'page_down':
+                            self.log_buffer.scroll_down(5)
+                            live.update(self.render_with_logs())
+                            continue
+                        elif key == 'home':
+                            self.log_buffer.scroll_to_top()
+                            live.update(self.render_with_logs())
+                            continue
+                        elif key == 'end':
+                            self.log_buffer.scroll_to_bottom()
+                            live.update(self.render_with_logs())
+                            continue
+
+                        # Обрабатываем клавишу текущим экраном
                         current_screen = self.screens[self.current_screen_name]
                         result = current_screen.handle_key(key)
 
