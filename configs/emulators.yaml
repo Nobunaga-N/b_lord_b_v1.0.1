@@ -2,7 +2,7 @@ emulators:
 - index: 0
   name: 0) astralshop@gmail
   adb_port: 5554
-  enabled: true
+  enabled: false
   notes: Требует настройки
 - index: 1
   name: 1) himera.like.a.knigh

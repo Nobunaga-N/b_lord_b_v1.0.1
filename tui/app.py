@@ -101,12 +101,92 @@ class BotTUIApp:
 
             logger.debug(f"Переключились на экран: {screen_name}")
 
+    def _get_key(self) -> Optional[str]:
+        """
+        Получение нажатой клавиши кроссплатформенно
+
+        Returns:
+            Строка с названием клавиши или None
+        """
+        try:
+            if sys.platform == 'win32':
+                # Windows
+                import msvcrt
+                if msvcrt.kbhit():
+                    key = msvcrt.getch()
+
+                    # Обработка специальных клавиш
+                    if key == b'\xe0' or key == b'\x00':  # Расширенные клавиши
+                        key = msvcrt.getch()
+                        key_map = {
+                            b'H': 'up',
+                            b'P': 'down',
+                            b'K': 'left',
+                            b'M': 'right',
+                        }
+                        return key_map.get(key)
+                    elif key == b'\x1b':  # ESC
+                        return 'escape'
+                    elif key == b'\r':  # Enter
+                        return 'enter'
+                    elif key == b' ':  # Space
+                        return ' '
+                    elif key == b'\x08':  # Backspace
+                        return 'backspace'
+                    else:
+                        try:
+                            return key.decode('utf-8', errors='ignore')
+                        except:
+                            return None
+            else:
+                # Linux/Unix
+                import select
+                import tty
+                import termios
+
+                if select.select([sys.stdin], [], [], 0.0)[0]:
+                    # Сохраняем текущие настройки терминала
+                    old_settings = termios.tcgetattr(sys.stdin)
+                    try:
+                        tty.setraw(sys.stdin.fileno())
+                        ch = sys.stdin.read(1)
+
+                        # Обработка escape-последовательностей
+                        if ch == '\x1b':
+                            # Читаем следующие символы для определения клавиши
+                            ch2 = sys.stdin.read(1)
+                            if ch2 == '[':
+                                ch3 = sys.stdin.read(1)
+                                key_map = {
+                                    'A': 'up',
+                                    'B': 'down',
+                                    'C': 'right',
+                                    'D': 'left',
+                                }
+                                return key_map.get(ch3, 'escape')
+                            return 'escape'
+                        elif ch == '\r' or ch == '\n':
+                            return 'enter'
+                        elif ch == ' ':
+                            return ' '
+                        elif ch == '\x7f':  # Backspace/Delete
+                            return 'backspace'
+                        else:
+                            return ch
+                    finally:
+                        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
+        except Exception as e:
+            logger.debug(f"Ошибка получения клавиши: {e}")
+            return None
+
+        return None
+
     def run(self):
         """Запуск TUI приложения"""
         self.running = True
 
         # Настраиваем логирование для TUI
-        # Убираем вывод логов в консоль, оставляем только в файл
         logger.remove()
         log_path = Path("data/logs/tui.log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,7 +197,8 @@ class BotTUIApp:
             level=self.config.get('log_level', 'INFO')
         )
 
-        # Добавляем минимальный вывод в консоль ниже TUI
+        # Добавляем вывод логов в консоль
+        # Они будут видны ПОД TUI интерфейсом
         logger.add(
             sys.stdout,
             format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
@@ -128,74 +209,35 @@ class BotTUIApp:
         logger.info("🚀 Запуск TUI приложения")
 
         try:
+            # ИСПРАВЛЕНИЕ: используем screen=True для альтернативного экрана
+            # Это позволит логам идти в основной буфер консоли
             with Live(
                     self.screens[self.current_screen_name].render(),
                     console=self.console,
                     refresh_per_second=4,
-                    screen=False  # Не используем альтернативный экран для отображения логов ниже
+                    screen=True  # ВАЖНО: используем альтернативный экран!
             ) as live:
 
                 while self.running:
-                    # Флаг необходимости обновления экрана
-                    need_update = False
+                    # Получаем клавишу
+                    key = self._get_key()
 
-                    # Получаем ввод без блокировки
-                    if self.console.is_terminal:
-                        # Читаем клавишу с таймаутом
+                    if key:
+                        # Обрабатываем клавишу
+                        current_screen = self.screens[self.current_screen_name]
+                        result = current_screen.handle_key(key)
+
+                        # Обновляем экран
                         try:
-                            import msvcrt
-                            if msvcrt.kbhit():
-                                key = msvcrt.getch().decode('utf-8', errors='ignore')
-
-                                # Обработка специальных клавиш
-                                if key == '\xe0':  # Расширенные клавиши
-                                    key = msvcrt.getch().decode('utf-8', errors='ignore')
-                                    if key == 'H':
-                                        key = 'up'
-                                    elif key == 'P':
-                                        key = 'down'
-                                    elif key == 'K':
-                                        key = 'left'
-                                    elif key == 'M':
-                                        key = 'right'
-                                elif key == '\x1b':  # ESC
-                                    key = 'escape'
-                                elif key == '\r':  # Enter
-                                    key = 'enter'
-                                elif key == ' ':  # Space
-                                    key = ' '
-                                elif key == '\x08':  # Backspace
-                                    key = 'backspace'
-
-                                # Обрабатываем клавишу
-                                current_screen = self.screens[self.current_screen_name]
-                                result = current_screen.handle_key(key)
-
-                                # После обработки клавиши ВСЕГДА обновляем экран
-                                need_update = True
-
-                                # Проверяем выход из приложения
-                                if result is False and key.lower() == 'q' and self.current_screen_name == 'main':
-                                    self.running = False
-                                    logger.info("Выход из приложения по запросу пользователя")
-                                    break
-
-                        except ImportError:
-                            # Unix-системы - используем другой подход
-                            import select
-                            if select.select([sys.stdin], [], [], 0.1)[0]:
-                                key = sys.stdin.read(1)
-                                current_screen = self.screens[self.current_screen_name]
-                                current_screen.handle_key(key)
-                                need_update = True
-
-                    # Обновляем экран ТОЛЬКО если была обработана клавиша
-                    if need_update:
-                        try:
-                            current_screen = self.screens[self.current_screen_name]
                             live.update(current_screen.render())
                         except Exception as e:
                             logger.error(f"Ошибка отрисовки экрана: {e}")
+
+                        # Проверяем выход из приложения
+                        if result is False and key.lower() == 'q' and self.current_screen_name == 'main':
+                            self.running = False
+                            logger.info("Выход из приложения по запросу пользователя")
+                            break
 
                     # Небольшая задержка для снижения нагрузки на CPU
                     time.sleep(0.05)

@@ -129,7 +129,10 @@ class EmulatorsScreen(BaseScreen):
 
     def handle_key(self, key: str) -> bool:
         """Обработка нажатий клавиш"""
-        key = key.lower()
+        # ИСПРАВЛЕНИЕ: не конвертируем специальные клавиши в lower
+        # Только обычные символьные клавиши
+        if len(key) == 1:
+            key = key.lower()
 
         if key == 'escape':
             self.app.switch_screen('main')
@@ -144,6 +147,7 @@ class EmulatorsScreen(BaseScreen):
                     return True
             return False
 
+        # ИСПРАВЛЕНИЕ: обработка стрелок ПЕРЕД другими клавишами
         if key == 'up':
             self.selected_index = max(0, self.selected_index - 1)
             return True
