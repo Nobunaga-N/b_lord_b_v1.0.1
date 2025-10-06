@@ -480,6 +480,9 @@ class Orchestrator:
         self.discovery = EmulatorDiscovery()
         logger.info(f"Инициализирован EmulatorDiscovery, конфиг: {self.discovery.config_path}")
 
+        # ДОБАВИТЬ: Загрузка существующей конфигурации при старте
+        self.discovery.load_config()
+
         # 2. Инициализация SmartLDConsole
         ldconsole_path = self.discovery.find_ldplayer_path()
         if not ldconsole_path:
@@ -638,14 +641,15 @@ class Orchestrator:
         Returns:
             Словарь со статусом системы
         """
-        # Загружаем конфигурацию
-        if not self.discovery.load_config():
+        # Проверяем наличие загруженной конфигурации
+        # БЕЗ перезагрузки - используем уже загруженные данные
+        if not self.discovery.emulators:
             return {
-                'error': 'Конфигурация не найдена',
+                'error': 'Конфигурация не найдена. Выполните сканирование эмуляторов',
                 'configured': False
             }
 
-        # Получаем информацию об эмуляторах
+        # Получаем информацию об эмуляторах из уже загруженной конфигурации
         all_emulators = self.discovery.get_emulators()
         enabled_emulators = self.discovery.get_enabled_emulators()
 

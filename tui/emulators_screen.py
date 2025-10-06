@@ -18,6 +18,8 @@ class EmulatorsScreen(BaseScreen):
         super().__init__(app)
         self.selected_index = 0
         self.emulators_list = []
+        self.scroll_offset = 0  # Смещение для скроллинга
+        self.visible_items = 15  # Количество видимых элементов за раз
 
     def activate(self):
         """При активации загружаем список эмуляторов"""
@@ -28,8 +30,25 @@ class EmulatorsScreen(BaseScreen):
         emulators = self.app.orchestrator.get_emulators_list()
         # Преобразуем в список для навигации
         self.emulators_list = [(idx, emu) for idx, emu in sorted(emulators.items())]
+
+        # Корректируем позицию курсора
         if self.selected_index >= len(self.emulators_list):
             self.selected_index = max(0, len(self.emulators_list) - 1)
+
+        # Корректируем скролл
+        self._adjust_scroll()
+
+    def _adjust_scroll(self):
+        """Корректировка положения скролла"""
+        if not self.emulators_list:
+            self.scroll_offset = 0
+            return
+
+        # Убеждаемся что выбранный элемент видим
+        if self.selected_index < self.scroll_offset:
+            self.scroll_offset = self.selected_index
+        elif self.selected_index >= self.scroll_offset + self.visible_items:
+            self.scroll_offset = self.selected_index - self.visible_items + 1
 
     def render(self) -> Layout:
         """Отрисовка экрана эмуляторов"""
@@ -61,7 +80,15 @@ class EmulatorsScreen(BaseScreen):
                 border_style="cyan"
             )
         else:
-            for i, (idx, emu) in enumerate(self.emulators_list):
+            # Вычисляем видимый диапазон
+            total_items = len(self.emulators_list)
+            start_idx = self.scroll_offset
+            end_idx = min(start_idx + self.visible_items, total_items)
+
+            # Отображаем только видимую часть списка
+            for i in range(start_idx, end_idx):
+                idx, emu = self.emulators_list[i]
+
                 # Маркер выбранного элемента
                 marker = "►" if i == self.selected_index else " "
 
@@ -90,9 +117,13 @@ class EmulatorsScreen(BaseScreen):
 
             # Информация
             info_text = Text()
-            info_text.append(f"Всего: {len(self.emulators_list)} эмуляторов\n")
+            info_text.append(f"Всего: {total_items} эмуляторов\n")
             enabled_count = sum(1 for _, emu in self.emulators_list if emu.enabled)
             info_text.append(f"Активных: {enabled_count}\n")
+
+            # Показываем информацию о скроллинге если элементов больше чем видимых
+            if total_items > self.visible_items:
+                info_text.append(f"Показано: {start_idx + 1}-{end_idx} из {total_items}", style="dim")
 
             emulators_panel = Panel(
                 emulators_table,
@@ -118,10 +149,10 @@ class EmulatorsScreen(BaseScreen):
             border_style="cyan"
         )
 
-        # Компоновка
+        # Компоновка - основная панель БЕЗ size, чтобы занимала всё доступное место
         layout.split_column(
             Layout(title_panel, size=3),
-            Layout(emulators_panel),
+            Layout(emulators_panel),  # БЕЗ size - растягивается на всё пространство
             Layout(help_panel, size=8)
         )
 
@@ -147,12 +178,20 @@ class EmulatorsScreen(BaseScreen):
                     return True
             return False
 
-        # ИСПРАВЛЕНИЕ: обработка стрелок ПЕРЕД другими клавишами
+        # Обработка стрелок с учетом скроллинга
         if key == 'up':
-            self.selected_index = max(0, self.selected_index - 1)
+            if self.selected_index > 0:
+                self.selected_index -= 1
+                # Автоскролл вверх
+                if self.selected_index < self.scroll_offset:
+                    self.scroll_offset = self.selected_index
             return True
         elif key == 'down':
-            self.selected_index = min(len(self.emulators_list) - 1, self.selected_index + 1)
+            if self.selected_index < len(self.emulators_list) - 1:
+                self.selected_index += 1
+                # Автоскролл вниз
+                if self.selected_index >= self.scroll_offset + self.visible_items:
+                    self.scroll_offset = self.selected_index - self.visible_items + 1
             return True
         elif key == ' ':  # Пробел - переключить выбранный
             if 0 <= self.selected_index < len(self.emulators_list):
