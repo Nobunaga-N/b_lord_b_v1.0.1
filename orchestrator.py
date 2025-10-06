@@ -216,7 +216,7 @@ class DynamicEmulatorProcessor:
                 if free_slots > 0:
                     # Получаем готовые эмуляторы по приоритету
                     ready_emulators = self.orchestrator.scheduler.get_ready_emulators_by_priority(
-                        max_count=free_slots
+                        max_concurrent=free_slots
                     )
 
                     for priority in ready_emulators:
